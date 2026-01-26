@@ -35,6 +35,11 @@ type DynamicNetwork struct {
 // for multiple unikernels in the same pod/network namespace.
 // See: https://github.com/urunc-dev/urunc/issues/13
 func (n DynamicNetwork) NetworkSetup(uid uint32, gid uint32) (*UnikernelNetworkInfo, error) {
+	// Attempt to clean up orphan TAPs created by urunc in this netns
+	if err := cleanupOrphanTaps(); err != nil {
+		return nil, fmt.Errorf("cleanupOrphanTaps failed: %w", err)
+	}
+
 	tapIndex, err := getTapIndex()
 	if err != nil {
 		return nil, fmt.Errorf("getTapIndex failed: %w", err)
