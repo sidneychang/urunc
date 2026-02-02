@@ -89,6 +89,23 @@ func New(bundlePath string, containerID string, rootDir string, cfg *UruncConfig
 
 	confMap := config.Map()
 
+	// Propagate selected OCI spec annotations into the state annotations.
+	// This is critical for features (like snapshot view) that rely on
+	// runtime metadata injected into the bundle's config.json by the shim,
+	// even when the unikernel config itself is loaded from urunc.json.
+	if spec.Annotations != nil {
+		// Snapshot view metadata injected by shim for urunc to consume without
+		// talking to containerd directly.
+		// Minimal contract: only the mounted RO view path.
+		if v := spec.Annotations[annotSnapshotViewMountPath]; v != "" {
+			confMap[annotSnapshotViewMountPath] = v
+		}
+		// Optional: keep CRI hint for namespace inference (k8s.io vs default).
+		if v := spec.Annotations["io.kubernetes.cri.container-name"]; v != "" {
+			confMap["io.kubernetes.cri.container-name"] = v
+		}
+	}
+
 	maps.Copy(confMap, cfg.Map())
 	containerDir := filepath.Join(rootDir, containerID)
 	state := &specs.State{
@@ -328,10 +345,33 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 	// if the respective annotation is set then, depending on the guest
 	// (supports block or 9pfs), it will use the supported option. In case
 	// both ae supported, then the block option will be used by default.
-	rootfsParams, err := chooseRootfs(bundleDir, rootfsDir, u.State.Annotations, unikernel, vmm, virtiofsdConfig.Path)
+	rootfsParams, err := chooseRootfs(bundleDir, rootfsDir, u.State.ID, u.State.Annotations, unikernel, vmm, virtiofsdConfig.Path)
 	if err != nil {
 		uniklog.Errorf("could not choose guest rootfs: %v", err)
 		return err
+	}
+
+	uniklog.WithFields(logrus.Fields{
+		"container_id":       u.State.ID,
+		"guest_rootfs":       rootfsParams.Type,
+		"rootfs_path":        rootfsParams.Path,
+		"mounted_path":       rootfsParams.MountedPath,
+		"monitor_rootfs":     rootfsParams.MonRootfs,
+		"from_snapshot_view": rootfsParams.FromSnapshotView,
+	}).Info("Selected guest rootfs configuration")
+
+	// Save snapshot view info to state annotations for cleanup during Delete
+	if rootfsParams.FromSnapshotView && rootfsParams.SnapshotView != nil {
+		uniklog.WithFields(logrus.Fields{
+			"container_id": u.State.ID,
+			"mount_path":   rootfsParams.SnapshotView.MountPath,
+		}).Info("Using shim-managed snapshot view for this container")
+		// Keep minimal annotations in sync for observability, but do not take over
+		// lifecycle management from the shim.
+		u.State.Annotations[annotSnapshotViewMountPath] = rootfsParams.SnapshotView.MountPath
+		if err := u.saveContainerState(); err != nil {
+			uniklog.WithError(err).Warn("Failed to save snapshot view info to state")
+		}
 	}
 
 	// Prepare Monitor rootfs
