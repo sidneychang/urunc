@@ -31,3 +31,5 @@ bundles/
 
 # python-related directories
 __pycache__/
+
+bunny/

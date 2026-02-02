@@ -25,6 +25,8 @@ import (
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
+
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
@@ -79,11 +81,58 @@ func getMountInfo(path string) (types.BlockDevParams, error) {
 	return types.BlockDevParams{}, ErrMountpoint
 }
 
+// bindViewFilesToMonRootfs bind-mounts unikernel, initrd, and urunc.json from the
+// snapshot view into the monitor rootfs so the VMM can read them directly
+// (no copy, no storage overhead). Used when FromSnapshotView is true.
+func bindViewFilesToMonRootfs(viewMountPath, monRootfs, unikernelPath, initrdPath, uruncJSON string) error {
+	norm := func(p string) string { return strings.TrimPrefix(filepath.Clean(p), "/") }
+	files := []struct{ src, target string }{
+		{filepath.Join(viewMountPath, unikernelPath), norm(unikernelPath)},
+		{filepath.Join(viewMountPath, uruncJSON), norm(uruncJSON)},
+	}
+	if initrdPath != "" {
+		files = append(files, struct{ src, target string }{
+			filepath.Join(viewMountPath, initrdPath), norm(initrdPath),
+		})
+	}
+
+	uniklog.WithFields(logrus.Fields{
+		"view_mount": viewMountPath,
+		"mon_rootfs": monRootfs,
+		"files":      len(files),
+	}).Info("Bind-mounting unikernel/initrd/urunc.json from snapshot view into monitor rootfs (no copy)")
+
+	for _, f := range files {
+		// We cannot reuse fileFromHost here because snapshot views are mounted
+		// read-only (devmapper requirement). fileFromHost() unconditionally tries
+		// to chmod/chown the destination path after bind-mounting, which fails
+		// with EROFS on a read-only filesystem. For snapshot views we only need
+		// a bind mount without touching permissions.
+		dstPath := filepath.Join(monRootfs, f.target)
+		dstDir := filepath.Dir(dstPath)
+		if err := bindMountFile(f.src, dstDir, dstPath, 0, unix.MS_BIND|unix.MS_PRIVATE, false); err != nil {
+			return fmt.Errorf("bind view %s -> monRootfs/%s: %w", f.src, f.target, err)
+		}
+
+		uniklog.WithFields(logrus.Fields{
+			"src":    f.src,
+			"target": filepath.Join(monRootfs, f.target),
+		}).Debug("Bind-mounted file from view")
+	}
+	uniklog.Info("Finished bind-mounting view files into monitor rootfs")
+	return nil
+}
+
 // extractUnikernelFromBlock moves unikernel binary, initrd and urunc.json
 // files from old rootfsPath to newRootfsPath
 // FIXME: This approach fills up /run with unikernel binaries, initrds and urunc.json
 // files for each unikernel we run
 func extractFilesFromBlock(rootfsPath string, newRootfsPath string, unikernel string, uruncJSON string, initrd string) error {
+	uniklog.WithFields(logrus.Fields{
+		"src": rootfsPath, "dst": newRootfsPath,
+		"unikernel": unikernel, "initrd": initrd, "urunc_json": uruncJSON,
+	}).Debug("Extracting unikernel/initrd/urunc.json from block rootfs (copy)")
+
 	currentUnikernelPath := filepath.Join(rootfsPath, unikernel)
 	targetUnikernelPath := filepath.Join(newRootfsPath, unikernel)
 	targetUnikernelDir, _ := filepath.Split(targetUnikernelPath)
@@ -91,6 +140,7 @@ func extractFilesFromBlock(rootfsPath string, newRootfsPath string, unikernel st
 	if err != nil {
 		return fmt.Errorf("Could not move %s to %s: %w", currentUnikernelPath, targetUnikernelPath, err)
 	}
+	uniklog.WithField("path", targetUnikernelPath).Debug("Copied unikernel")
 
 	if initrd != "" {
 		currentInitrdPath := filepath.Join(rootfsPath, initrd)
@@ -100,6 +150,7 @@ func extractFilesFromBlock(rootfsPath string, newRootfsPath string, unikernel st
 		if err != nil {
 			return fmt.Errorf("Could not move %s to %s: %w", currentInitrdPath, targetInitrdPath, err)
 		}
+		uniklog.WithField("path", targetInitrdPath).Debug("Copied initrd")
 	}
 
 	currentConfigPath := filepath.Join(rootfsPath, uruncJSON)
@@ -107,7 +158,7 @@ func extractFilesFromBlock(rootfsPath string, newRootfsPath string, unikernel st
 	if err != nil {
 		return fmt.Errorf("Could not move %s to %s: %w", currentConfigPath, newRootfsPath, err)
 	}
-
+	uniklog.WithField("path", filepath.Join(newRootfsPath, uruncJSON)).Debug("Copied urunc.json")
 	return nil
 }
 
@@ -124,12 +175,20 @@ func prepareDMAsBlock(rootfsPath string, newRootfsPath string, unikernel string,
 	if err != nil {
 		return err
 	}
+
+	uniklog.
+		WithField("rootfs_path", rootfsPath).
+		WithField("mon_rootfs_path", newRootfsPath).
+		Info("Prepared monitor rootfs from block-based container rootfs (devmapper/blockfile snapshot)")
+
+	uniklog.WithField("rootfs_path", rootfsPath).Info("Unmounting block-based container rootfs to reuse device for unikernel")
 	// unmount block device
 	// FIXME: umount and rm might need some retries
 	err = mount.Unmount(rootfsPath)
 	if err != nil {
 		return err
 	}
+	uniklog.WithField("rootfs_path", rootfsPath).Info("Unmounted block-based container rootfs")
 
 	return nil
 }
@@ -170,16 +229,84 @@ func handleExplicitBlockImage(blockImg string, mountPoint string) (types.BlockDe
 }
 
 func handleCntrRootfsAsBlock(rfs types.RootfsParams, unikernelType string, unikernelPath string, uruncJSONFilename string, initrdPath string, mounts []specs.Mount) (types.BlockDevParams, error) {
+	if rfs.FromSnapshotView {
+		// Using snapshot view: bind-mount unikernel/initrd/urunc.json from view into
+		// monitor rootfs so we read directly (no copy, no storage overhead).
+		uniklog.
+			WithField("mounted_path", rfs.MountedPath).
+			WithField("block_device", rfs.Path).
+			WithField("mon_rootfs", rfs.MonRootfs).
+			Info("Setting up container rootfs as block device for guest using snapshot view (no file copy needed)")
+
+		uniklog.Debug("Snapshot view path: bind-mounting unikernel/initrd/urunc.json from view mount into monitor rootfs")
+		err := bindViewFilesToMonRootfs(rfs.SnapshotView.MountPath, rfs.MonRootfs, unikernelPath, initrdPath, uruncJSONFilename)
+		if err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		// We must NOT copy bind-mounted files into the snapshot view mount (read-only).
+		// Instead, copy them into the active container rootfs mount (rfs.MountedPath),
+		// then unmount it before passing its block device to the guest (same semantics
+		// as the original copy+unmount path, but without copying unikernel artifacts).
+		uniklog.Debug("Snapshot view path: copying bind-mount contents into active rootfs before unmount")
+		err = copyMountfiles(rfs.MountedPath, mounts)
+		if err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		uniklog.WithField("rootfs_path", rfs.MountedPath).Info("Snapshot view path: unmounting active container rootfs to reuse device for unikernel")
+		if err := mount.Unmount(rfs.MountedPath); err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		uniklog.WithField("block_device", rfs.Path).Debug("Snapshot view path: setting up block device in monitor rootfs")
+		err = setupDev(rfs.MonRootfs, rfs.Path)
+		if err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		mp := "/"
+		if unikernelType == "rumprun" {
+			mp = "/data"
+		}
+
+		uniklog.WithFields(logrus.Fields{
+			"block_device": rfs.Path,
+			"guest_mount":  mp,
+		}).Info("Snapshot view block setup complete; guest rootfs will use view block device")
+		return types.BlockDevParams{
+			Source:     rfs.Path,
+			MountPoint: mp,
+			ID:         "rootfs",
+		}, nil
+	}
+
+	// Original logic: copy files and unmount original rootfs
+	uniklog.
+		WithField("mounted_path", rfs.MountedPath).
+		WithField("block_device", rfs.Path).
+		WithField("mon_rootfs", rfs.MonRootfs).
+		Info("Setting up container rootfs as block device for guest (block-based snapshotter, copy+unmount path)")
+
+	uniklog.Debug("Block path (no snapshot view): copying mount files")
 	err := copyMountfiles(rfs.MountedPath, mounts)
 	if err != nil {
 		return types.BlockDevParams{}, err
 	}
 
+	uniklog.WithFields(logrus.Fields{
+		"rootfs_path": rfs.MountedPath,
+		"mon_rootfs":  rfs.MonRootfs,
+		"unikernel":   unikernelPath,
+		"initrd":      initrdPath,
+		"urunc_json":  uruncJSONFilename,
+	}).Info("Block path: copying unikernel/initrd/urunc.json then unmounting container rootfs")
 	err = prepareDMAsBlock(rfs.MountedPath, rfs.MonRootfs, unikernelPath, uruncJSONFilename, initrdPath)
 	if err != nil {
 		return types.BlockDevParams{}, err
 	}
 
+	uniklog.Debug("Block path: setting up block device in monitor rootfs")
 	err = setupDev(rfs.MonRootfs, rfs.Path)
 	if err != nil {
 		return types.BlockDevParams{}, err
@@ -243,13 +370,18 @@ func handleBlockBasedRootfs(rfs types.RootfsParams, ukernel types.Unikernel, uni
 	var blockArgs []types.BlockDevParams
 	var rootfsBlock types.BlockDevParams
 	var err error
+
+	// Determine if this is an explicit block file case vs container rootfs as block
+	// Explicit block: uses a block file (e.g., /rootfs.ext2) inside the container (MountedPath == "")
+	// Container rootfs as block: the container rootfs itself is the block device (MountedPath != "")
 	if rfs.MountedPath == "" {
-		// The Mountpoint in the annotation was "/" and hence the rootfs
-		// of the guest is a block Image inside the container's image.
+		// Explicit block file case: block file is accessed directly from container rootfs
 		rootfsBlock, err = handleExplicitBlockImage(rfs.Path, "/")
 	} else {
+		// Container rootfs as block device case (may use snapshot view optimization)
 		rootfsBlock, err = handleCntrRootfsAsBlock(rfs, unikernelType, unikernelPath, uruncJSONFilename, initrdPath, mounts)
 	}
+
 	if err != nil {
 		return nil, err
 	}
