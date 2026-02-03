@@ -131,6 +131,11 @@ func loadSpec(bundleDir string) (*specs.Spec, error) {
 	return &spec, nil
 }
 
+// WritePidFile is a public wrapper used by cmd to satisfy OCI pid-file expectations.
+func WritePidFile(path string, pid int) error {
+	return writePidFile(path, pid)
+}
+
 // writePidFile writes the content of pid to the file defined by path
 func writePidFile(path string, pid int) error {
 	var (

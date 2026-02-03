@@ -258,6 +258,13 @@ func createUnikontainer(cmd *cli.Command, uruncCfg *unikontainers.UruncConfig) (
 	if err != nil {
 		return err
 	}
+	// OCI runtimes are expected to write the PID to the provided pidfile.
+	// Without it, the supervising runtime cannot track/reap the process and cleanup may fail.
+	if pidFile := cmd.String("pid-file"); pidFile != "" {
+		if err := unikontainers.WritePidFile(pidFile, containerPid); err != nil {
+			return err
+		}
+	}
 
 	// execute CreateRuntime hooks
 	err = unikontainer.ExecuteHooks("CreateRuntime")
