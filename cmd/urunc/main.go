@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/syslog"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/sirupsen/logrus"
 	lSyslog "github.com/sirupsen/logrus/hooks/syslog"
 	m "github.com/urunc-dev/urunc/internal/metrics"
+	"github.com/urunc-dev/urunc/pkg/rootless"
 	"github.com/urunc-dev/urunc/pkg/unikontainers"
 
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
@@ -74,6 +76,12 @@ func (f *FatalWriter) Write(p []byte) (n int, err error) {
 
 func main() {
 	root := "/run/urunc"
+	xdgDirUsed := false
+	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if xdgRuntimeDir != "" && rootless.ShouldHonorXDGRuntimeDir() {
+		root = xdgRuntimeDir + "/runc"
+		xdgDirUsed = true
+	}
 	cmd := &cli.Command{
 		Name:    "urunc",
 		Usage:   usage,
@@ -118,6 +126,19 @@ func main() {
 			// stateCommand,
 		},
 		Before: func(_ context.Context, cmd *cli.Command) (context.Context, error) {
+			if !cmd.IsSet("root") && xdgDirUsed {
+				// According to the XDG specification, we need to set anything in
+				// XDG_RUNTIME_DIR to have a sticky bit if we don't want it to get
+				// auto-pruned.
+				if err := os.MkdirAll(root, 0o700); err != nil {
+					fmt.Fprintln(os.Stderr, "the path in $XDG_RUNTIME_DIR must be writable by the user")
+					fatal(err)
+				}
+				if err := os.Chmod(root, os.FileMode(0o700)|os.ModeSticky); err != nil {
+					fmt.Fprintln(os.Stderr, "you should check permission of the path in $XDG_RUNTIME_DIR")
+					fatal(err)
+				}
+			}
 			if err := reviseRootDir(cmd); err != nil {
 				return nil, err
 			}
