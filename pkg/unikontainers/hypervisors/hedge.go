@@ -1,4 +1,4 @@
-// Copyright (c) 2023-2025, Nubificus LTD
+// Copyright (c) 2023-2026, Nubificus LTD
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,7 +50,12 @@ func (h *Hedge) Path() string {
 	return ""
 }
 
-func (h *Hedge) Execve(_ types.ExecArgs, _ types.Unikernel) error {
+func (h *Hedge) BuildExecCmd(_ types.ExecArgs, _ types.Unikernel) ([]string, error) {
+	return nil, fmt.Errorf("hedge not implemented yet")
+}
+
+// PreExec performs pre-execution setup. Hedge is not fully implemented.
+func (h *Hedge) PreExec(_ types.ExecArgs) error {
 	return fmt.Errorf("hedge not implemented yet")
 }
 

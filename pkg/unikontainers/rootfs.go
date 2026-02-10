@@ -1,4 +1,4 @@
-// Copyright (c) 2023-2025, Nubificus LTD
+// Copyright (c) 2023-2026, Nubificus LTD
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -310,6 +310,7 @@ func changeRoot(rootfsDir string, pivot bool) error {
 	return nil
 }
 
+// nolint:gocyclo
 // prepareMonRootfs prepares the rootfs where the monitor will execute. It
 // essentially sets up the devices (KVM, snapshotter block device) that are required
 // for the guest execution and any other files (e.g. binaries).

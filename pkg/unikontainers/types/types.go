@@ -1,4 +1,4 @@
-// Copyright (c) 2023-2025, Nubificus LTD
+// Copyright (c) 2023-2026, Nubificus LTD
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//revive:disable:var-naming
 package types
 
 type Unikernel interface {
@@ -25,7 +26,14 @@ type Unikernel interface {
 }
 
 type VMM interface {
-	Execve(args ExecArgs, ukernel Unikernel) error
+	// BuildExecCmd builds and validates the VMM command arguments without executing.
+	// This is used to verify the command can be built before reporting container as started.
+	// The returned slice contains the command path as the first element followed by arguments.
+	BuildExecCmd(args ExecArgs, ukernel Unikernel) ([]string, error)
+	// PreExec performs any monitor-specific setup that must happen after BuildExecCmd
+	// succeeds but before syscall.Exec is called. For example, HVT applies seccomp
+	// filters here. Most monitors can return nil (no-op).
+	PreExec(args ExecArgs) error
 	Stop(int) error
 	Path() string
 	UsesKVM() bool

@@ -1,4 +1,4 @@
-// Copyright (c) 2023-2025, Nubificus LTD
+// Copyright (c) 2023-2026, Nubificus LTD
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -147,9 +147,14 @@ func (u *Unikontainer) InitialSetup() error {
 }
 
 // Create sets the Unikernel status as created,
-// and saves the given PID in init.pid
-func (u *Unikontainer) Create(pid int) error {
-	err := writePidFile(filepath.Join(u.State.Bundle, initPidFilename), pid)
+// and saves the given PID in the provided pid file path.
+// If pidFilePath is empty, it falls back to the default init.pid path.
+func (u *Unikontainer) Create(pid int, pidFilePath string) error {
+	path := filepath.Join(u.State.Bundle, initPidFilename)
+	if pidFilePath != "" {
+		path = pidFilePath
+	}
+	err := writePidFile(path, pid)
 	if err != nil {
 		return err
 	}
@@ -195,6 +200,7 @@ func (u *Unikontainer) SetupNet() (types.NetDevParams, error) {
 	return netArgs, nil
 }
 
+// nolint:gocyclo
 func (u *Unikontainer) Exec(metrics m.Writer) error {
 	metrics.Capture(m.TS15)
 
@@ -336,7 +342,7 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 		return err
 	}
 
-	// Setup the rootfs for the the monitor execution, creating necessary
+	// Setup the rootfs for the monitor execution, creating necessary
 	// devices and the monitor's binary.
 	err = prepareMonRootfs(rootfsParams.MonRootfs, vmm.Path(), u.UruncCfg.Monitors[vmmType].DataPath, vmm.UsesKVM(), withTUNTAP)
 	if err != nil {
@@ -493,18 +499,36 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 
 	uniklog.Debug("calling vmm execve")
 	metrics.Capture(m.TS18)
-	// metrics.Wait()
-	// TODO: We set the state to running and notify urunc Start that the monitor
-	// started, but we might encounter issues with the monitor execution. We need
-	// to revisit this and check if a failed monitor execution affects this approach.
-	// If it affects then we need to re-design the whole spawning of the monitor.
-	// Notify urunc start
+
+	// Build the VMM command once and verify it can be constructed successfully.
+	// This ensures we don't report the container as started if command building fails.
+	execCmd, err := vmm.BuildExecCmd(vmmArgs, unikernel)
+	if err != nil {
+		uniklog.WithError(err).Error("failed to build VMM command")
+		return err
+	}
+
+	// Notify urunc start that the monitor is ready to execute.
+	// We send this after BuildExecCmd succeeds to avoid reporting a container
+	// as started when the VMM command cannot be built.
+	// TODO: The container can still be reported as running if the PreExec step
+	// (e.g., BPF/seccomp filter setup) fails after this point. We should find
+	// a way to handle that case as well.
 	err = u.SendMessage(StartSuccess)
 	if err != nil {
 		return err
 	}
 
-	return vmm.Execve(vmmArgs, unikernel)
+	// Perform any monitor-specific pre-exec setup (e.g., seccomp filters for HVT).
+	err = vmm.PreExec(vmmArgs)
+	if err != nil {
+		uniklog.WithError(err).Error("failed to perform pre-exec setup")
+		return err
+	}
+
+	// Execute the VMM using the command we built earlier.
+	uniklog.WithField("command", execCmd).Debug("Ready to execve VMM")
+	return syscall.Exec(vmm.Path(), execCmd, vmmArgs.Environment) //nolint: gosec
 }
 
 func setupUser(user specs.User) error {
@@ -601,7 +625,7 @@ func (u *Unikontainer) Delete() error {
 	// if the monitorRootfsDirName directory exists under the bundle.
 	_, err = os.Stat(monRootfs)
 	if !os.IsNotExist(err) {
-		// Since there was no no block defined for the unikernel
+		// Since there was no block defined for the unikernel
 		// and we created a new rootfs for the monitor, we need to
 		// clean it up.
 		dirs = append(dirs, monitorRootfsDirName)
@@ -820,6 +844,7 @@ func loadUnikontainerState(stateFilePath string) (*specs.State, error) {
 	return &state, nil
 }
 
+// nolint:gocyclo
 // FormatNsenterInfo encodes namespace info in netlink binary format
 // as a io.Reader, in order to send the info to nsenter.
 // The implementation is inspired from:

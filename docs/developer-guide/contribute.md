@@ -4,10 +4,11 @@ title: "Contributing"
 description: "Contributing guidelines"
 ---
 
-Urunc is an open-source project licenced under the [Apache License 2.0](https://github.com/urunc-dev/urunc/blob/main/LICENSE).
-We welcome anyone who would be interested in contributing to `urunc`.
-As a first step, please take a look at the following document.
-The current document provides a high level overview of `urunc`'s code structure, along with a few guidelines regarding contributions to the project.
+Urunc is an open-source project licenced under the [Apache License
+2.0](https://github.com/urunc-dev/urunc/blob/main/LICENSE). We welcome anyone
+who would be interested in contributing to `urunc`. As a first step, please
+take a look at the following document and the [LLM
+policy](../developer-guide/llm-policy.md)).
 
 ## Table of contents:
 
@@ -33,19 +34,30 @@ Therefore, we expect any new documentation related files to be placed under `/do
 
 ## How to contribute
 
-There are plenty of ways to contribute to an open source project, even without changing or touching the code.
-Therefore, anyone who is interested in this project is very welcome to contribute in one of the following ways:
+There are plenty of ways to contribute to an open source project, even without
+changing or touching the code. Therefore, anyone who is interested in this
+project is very welcome to contribute in one of the following ways:
 
-1.  Using `urunc`. Try it out yourself and let us know your experience. Did everything work well? Were the instructions clear?
-2.  Improve or suggest changes to the documentation of the project. Documentation is very important for every project, hence any ideas on how to improve the documentation to make it more clear are more than welcome.
-3.  Request new features. Any proposals for improving or adding new features are very welcome.
-4.  Find a bug and report it. Bugs are everywhere and some are hidden very well. As a result, we would really appreciate it if someone found a bug and reported it to the maintainers.
-5.  Make changes to the code. Improve the code, add new functionalities and make `urunc` even more useful.
+- Using `urunc`. Try it out yourself and let us know your experience. Did
+  everything work well? Were the instructions clear?
+- Improve or suggest changes to the documentation of the project.
+  Documentation is very important for every project, hence any ideas on how to
+  improve the documentation to make it more clear are more than welcome.
+- Request new features. Any proposals for improving or adding new features are
+  very welcome.
+- Find a bug and report it. Bugs are everywhere and some are hidden very well.
+  As a result, we would really appreciate it if someone found a bug and
+  reported it to the maintainers.
+- Find an existing issue that interests you and try to resolve it. To get
+  started, simply express your interest in a comment, and the maintainers will
+  either assign the issue to you or ask for a proposal.
 
 ## Opening an issue
 
-We use Github issues to track bugs and requests for new features.
-Anyone is welcome to open a new issue, which is either related to a bug or a request for a new feature.
+We use Github issues to track bugs and requests for new features. Anyone is
+welcome to open a new issue, which is either related to a bug or a request for
+a new feature. Please make sure to read the [LLM
+policy](../developer-guide/llm-policy.md) in cases where an LLM has been used.
 
 ### Reporting bugs
 
@@ -91,14 +103,26 @@ However, we kindly ask you to mark the issue with the enhancement label and prov
 
 Anyone should feel free to submit a change or an addition to the codebase of `urunc`.
 Currently, we use Github's Pull Requests (PRs) to submit changes to `urunc`'s codebase.
-Before creating a new PR, please follow the guidelines below:
+Before creating a new PR, please follow the rules below:
 
+- Avoid opening PRs for non-existent issues. Please create an issue first.
+- Complete the PR template.
+- In case LLMs have been used, please read the [LLM
+  policy](../developer-guide/llm-policy.md).
+- Avoid changes unrelated to the PR/issue.
+- Test the changes locally.
 - Make sure that the changes do not break the building process of `urunc`.
 - Make sure that all the tests run successfully.
-- Make sure that no commit in a PR breaks the building process of `urunc`
+- Make sure that no commit in a PR breaks the building process of `urunc`.
 - Make sure to sign-off your commits.
+- Organize changes into logical commits. Each commit should represent a single,
+  specific change, avoiding both overly large and overly small commits.
 - Provide meaningful commit messages, describing shortly the changes.
-- Provide a meaningful PR message
+- Provide a meaningful PR message.
+
+The maintainers and andmins of the `urunc` project reserve the right to close
+PRs that do not comply with the above rules,with reference to this contribution
+guide.
 
 A new (draft) PR triggers the following process:
 
