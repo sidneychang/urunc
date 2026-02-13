@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 
 	"github.com/jackpal/gateway"
@@ -67,13 +68,15 @@ func getTapIndex() (int, error) {
 	}
 	tapCount := 0
 	for _, iface := range ifaces {
-		if strings.Contains(iface.Name, "tap") {
+		netlog.Debugf("discovered interface %s", iface.Name)
+		if strings.Contains(iface.Name, "tap") && strings.Contains(iface.Name, "urunc") {
 			tapCount++
 		}
 	}
 	if tapCount > 255 {
 		return tapCount, fmt.Errorf("TAP interfaces count higher than 255")
 	}
+	netlog.Debugf("tapCount %d", tapCount)
 	return tapCount, nil
 }
 
@@ -349,19 +352,27 @@ func discoverContainerIface() (netlink.Link, error) {
 			netlog.Debugf("skipping interface %s: failed to list routes: %v", attrs.Name, err)
 			continue
 		}
+		hasDefaultRoute := false
 		for _, r := range routes {
 			// default route: Dst == nil OR represented as 0.0.0.0/0 or ::/0
 			if r.Dst == nil {
-				return link, nil
+				hasDefaultRoute = true
+				break
 			}
-			if r.Dst != nil {
-				dstStr := r.Dst.String()
-				if dstStr == "0.0.0.0/0" || dstStr == "::/0" {
-					return link, nil
-				}
+			if dstStr := r.Dst.String(); dstStr == "0.0.0.0/0" || dstStr == "::/0" {
+				hasDefaultRoute = true
+				break
 			}
 		}
-		netlog.Debugf("skipping interface %s: no default route found", attrs.Name)
+		if !hasDefaultRoute {
+			netlog.Debugf("skipping interface %s: no default route found", attrs.Name)
+			continue
+		}
+		// Only accept veth devices (e.g. eth0 from ctr/CNI); skip tap (e.g. from Podman slirp4netns)
+		if _, isVeth := link.(*netlink.Veth); isVeth {
+			return link, nil
+		}
+		netlog.Debugf("skipping interface %s: has default route but not a veth device", attrs.Name)
 	}
 	return nil, errors.New("no suitable network interface found in namespace")
 }
@@ -419,5 +430,63 @@ func deleteTapDevice(device netlink.Link) error {
 		netlog.Errorf("Failed to delete link: %v", err)
 		return err
 	}
+	return nil
+}
+func cleanupOrphanTaps() error {
+	netlog.Debug("running cleanupOrphanTaps (carrier-state based)")
+
+	// If there is no container interface (e.g. no eth0), do not attempt to create/delete taps.
+	// This avoids touching taps in netns that aren't ready or belong to other runtimes (ctr).
+	if _, err := discoverContainerIface(); err != nil {
+		netlog.Debug("no container interface found in namespace; skipping orphan TAP cleanup")
+		return nil
+	}
+
+	// Per design: assume at-most-one unikernel per netns. No inter-process netns lock is used.
+
+	handle, err := netlink.NewHandle()
+	if err != nil {
+		return fmt.Errorf("failed to get netlink handle: %w", err)
+	}
+	defer handle.Close()
+
+	links, err := handle.LinkList()
+	if err != nil {
+		return fmt.Errorf("failed to list links: %w", err)
+	}
+
+	tapRe := regexp.MustCompile(`^tap.*_urunc$`)
+	for _, link := range links {
+		attrs := link.Attrs()
+		if attrs == nil {
+			continue
+		}
+		name := attrs.Name
+		if !tapRe.MatchString(name) {
+			continue
+		}
+
+		// The device is in a 'Zombie' state: Administrative status is UP, but
+		// Operational status is DOWN with NO-CARRIER.
+		// In the Linux TUN/TAP driver model, NO-CARRIER on an UP interface
+		// definitively proves that no userspace process holds the file descriptor
+		// for this device.
+		if (attrs.Flags&net.FlagRunning) != 0 || attrs.OperState == netlink.OperUp {
+			return fmt.Errorf("found tap %s with carrier/oper state UP: aborting cleanup (unikernel may be running)", name)
+		}
+
+		netlog.Debugf("deleting orphan tap %s (no carrier)", name)
+		if err := deleteAllTCFilters(link); err != nil {
+			return fmt.Errorf("failed to delete tc filters for %s: %w", name, err)
+		}
+		if err := deleteAllQDiscs(link); err != nil {
+			return fmt.Errorf("failed to delete qdiscs for %s: %w", name, err)
+		}
+		if err := deleteTapDevice(link); err != nil {
+			return fmt.Errorf("failed to delete tap %s: %w", name, err)
+		}
+		netlog.Debugf("deleted orphan tap %s", name)
+	}
+
 	return nil
 }

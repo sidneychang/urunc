@@ -64,9 +64,14 @@ func createTmpfs(monRootfs string, path string, flags uint64, mode string, size 
 
 	if mode == "1777" {
 		// sonarcloud:go:S2612 -- This is a tmpfs mount point, sticky bit 1777 is required (like /tmp), controlled path, safe by design
-		err := os.Chmod(path, 01777) // NOSONAR
+		// Use dstPath (not path): we must chmod the tmpfs mount point inside monRootfs, not the host's /tmp.
+		err := os.Chmod(dstPath, 01777) // NOSONAR
 		if err != nil {
-			return fmt.Errorf("failed to chmod %s: %w", path, err)
+			// tmpfs mount options already set mode=1777; chmod can fail with EPERM in rootless.
+			if errors.Is(err, unix.EPERM) {
+				return nil
+			}
+			return fmt.Errorf("failed to chmod %s: %w", dstPath, err)
 		}
 	}
 	return nil
@@ -116,6 +121,11 @@ func setupDev(monRootfs string, devPath string) error {
 	// Create the new device node
 	err = unix.Mknod(dstPath, devStat.Mode, int(newDev)) //nolint: gosec
 	if err != nil {
+		// In rootless mode, mknod fails with EPERM (CAP_MKNOD not available).
+		// Fall back to bind mount, which does not require special capabilities.
+		if errors.Is(err, unix.EPERM) {
+			return fileFromHost(monRootfs, devPath, "", unix.MS_BIND|unix.MS_PRIVATE, false)
+		}
 		return fmt.Errorf("failed to make device node %s: %w", dstPath, err)
 	}
 
@@ -189,14 +199,20 @@ func fileFromHost(monRootfs string, hostPath string, target string, mFlags int, 
 	}
 
 	// Set up the permissions and ownership of the original file.
-	err = unix.Chmod(dstPath, fileInfo.Mode)
-	if err != nil {
-		return fmt.Errorf("failed to chmod %s: %w", dstPath, err)
-	}
+	// Skip chmod/chown for bind mounts: the destination is the same inode as
+	// the source, so permissions are already correct. Attempting to chmod the
+	// bind-mounted file would modify the original file on the host, which fails
+	// with EPERM in rootless mode (e.g. /usr/bin/qemu-system-x86_64 owned by root).
+	if withCopy {
+		err = unix.Chmod(dstPath, fileInfo.Mode)
+		if err != nil {
+			return fmt.Errorf("failed to chmod %s: %w", dstPath, err)
+		}
 
-	err = os.Chown(dstPath, int(fileInfo.Uid), int(fileInfo.Gid))
-	if err != nil {
-		return fmt.Errorf("failed to chown %s: %w", dstPath, err)
+		err = os.Chown(dstPath, int(fileInfo.Uid), int(fileInfo.Gid))
+		if err != nil {
+			return fmt.Errorf("failed to chown %s: %w", dstPath, err)
+		}
 	}
 
 	// The initial MS_BIND won't change the mount options, we need to do a
@@ -208,6 +224,13 @@ func fileFromHost(monRootfs string, hostPath string, target string, mFlags int, 
 		flags := mFlags | unix.MS_BIND | unix.MS_REMOUNT
 		err = unix.Mount(dstPath, dstPath, "", uintptr(flags), "")
 		if err != nil {
+			// In rootless mode, MS_REMOUNT can fail with EPERM (e.g. when
+			// bind-mounting devices into overlay storage). The bind mount
+			// is already in place and functional; propagation flags are
+			// a nicety we can skip.
+			if errors.Is(err, unix.EPERM) {
+				return nil
+			}
 			return fmt.Errorf("Failed to set mount flags for %s: %w", dstPath, err)
 		}
 	}
