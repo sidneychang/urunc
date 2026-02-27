@@ -32,6 +32,13 @@ const (
 
 var netlog = logrus.WithField("subsystem", "network")
 
+// ErrNoSuitableIface is returned by discoverContainerIface when no non-loopback
+// interface with addresses and a default route can be found in the current
+// network namespace. This typically means that the container-side network
+// device has already been torn down (e.g. by Podman in rootless/pasta mode),
+// in which case cleanup can safely treat this as "already cleaned up".
+var ErrNoSuitableIface = errors.New("no suitable network interface found in namespace")
+
 type UnikernelNetworkInfo struct {
 	TapDevice string
 	EthDevice Interface
@@ -67,7 +74,17 @@ func getTapIndex() (int, error) {
 	}
 	tapCount := 0
 	for _, iface := range ifaces {
-		if strings.Contains(iface.Name, "tap") {
+		// Only consider TAP devices that are managed by urunc itself.
+		// Podman (especially with slirp4netns or bridge backends) may create
+		// its own TAP interfaces such as "tap0". These should not be treated
+		// as evidence of an existing unikernel instance, otherwise we will
+		// incorrectly refuse to configure networking in a fresh netns.
+		//
+		// urunc-managed TAP devices follow the DefaultTap pattern ("tapX_urunc"):
+		// we expect both a "tap" prefix and an "_urunc" suffix. This keeps the
+		// original semantic meaning of "count urunc TAPs", while avoiding
+		// counting backend-provided TAPs like "tap0".
+		if strings.HasPrefix(iface.Name, "tap") && strings.HasSuffix(iface.Name, "_urunc") {
 			tapCount++
 		}
 	}
@@ -363,22 +380,37 @@ func discoverContainerIface() (netlink.Link, error) {
 		}
 		netlog.Debugf("skipping interface %s: no default route found", attrs.Name)
 	}
-	return nil, errors.New("no suitable network interface found in namespace")
+	return nil, ErrNoSuitableIface
 }
 
 func deleteAllQDiscs(device netlink.Link) error {
-	err := deleteIngressQdisc(device)
-	if err != nil {
+	// Always try to remove ingress qdisc from the TAP device itself.
+	if err := deleteIngressQdisc(device); err != nil {
 		return err
 	}
-	device, err = discoverContainerIface()
+
+	// Then try to remove ingress qdisc from the container-side interface, if
+	// it still exists. In rootless/pasta mode, Podman may have already torn
+	// down that interface before urunc's cleanup runs; treat that case as a
+	// successful, idempotent cleanup.
+	containerDev, err := discoverContainerIface()
 	if err != nil {
+		if errors.Is(err, ErrNoSuitableIface) {
+			netlog.Debugf("no container interface found during qdisc cleanup, assuming already removed: %v", err)
+			return nil
+		}
 		return err
 	}
-	err = deleteIngressQdisc(device)
-	if err != nil {
+
+	// Avoid operating twice on the same device.
+	if containerDev.Attrs().Index == device.Attrs().Index {
+		return nil
+	}
+
+	if err := deleteIngressQdisc(containerDev); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -390,18 +422,29 @@ func deleteAllTCFilters(device netlink.Link) error {
 		return err
 	}
 	allFilters = append(allFilters, tapFilters...)
-	device, err = discoverContainerIface()
+
+	// Try to collect filters from the container-side interface as well. In
+	// scenarios like rootless Podman with pasta, that interface may already
+	// have been removed by the time Cleanup runs; in that case we only clean
+	// up filters on the TAP and consider the absence of a container interface
+	// to be a successful, idempotent cleanup.
+	containerDev, err := discoverContainerIface()
 	if err != nil {
-		return err
-	}
-	ethFilters, err := netlink.FilterList(device, parent)
-	if err != nil {
-		return err
-	}
-	allFilters = append(allFilters, ethFilters...)
-	for _, filter := range allFilters {
-		err = netlink.FilterDel(filter)
+		if errors.Is(err, ErrNoSuitableIface) {
+			netlog.Debugf("no container interface found during tc filter cleanup, assuming already removed: %v", err)
+		} else {
+			return err
+		}
+	} else if containerDev.Attrs().Index != device.Attrs().Index {
+		ethFilters, err := netlink.FilterList(containerDev, parent)
 		if err != nil {
+			return err
+		}
+		allFilters = append(allFilters, ethFilters...)
+	}
+
+	for _, filter := range allFilters {
+		if err := netlink.FilterDel(filter); err != nil {
 			return err
 		}
 	}

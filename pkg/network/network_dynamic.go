@@ -47,6 +47,30 @@ func (n DynamicNetwork) NetworkSetup(uid uint32, gid uint32) (*UnikernelNetworkI
 	}
 	netlog.Debugf("found interface %s (index=%d)", redirectLink.Attrs().Name, redirectLink.Attrs().Index)
 
+	// If the discovered container interface is itself a TAP device that is
+	// not managed by urunc (e.g. slirp4netns' tap0 or a bridge backend TAP),
+	// avoid creating an extra tap (tapX_urunc) on top of it. Instead, treat
+	// this existing TAP as the unikernel's tap device directly.
+	//
+	// This keeps the original behaviour for pasta/bridge/veth-style setups,
+	// where redirectLink is a "normal" L2 interface (ens33, eth0, veth*),
+	// but prevents the awkward tap0 -> tap0_urunc layering in slirp4netns
+	// scenarios.
+	name := redirectLink.Attrs().Name
+	if strings.HasPrefix(name, "tap") && !strings.HasSuffix(name, "_urunc") {
+		netlog.Debugf("using existing TAP %s as unikernel tap (no additional tapX_urunc will be created)", name)
+
+		ifInfo, err := getInterfaceInfo(name)
+		if err != nil {
+			return nil, fmt.Errorf("getInterfaceInfo(%s) failed: %w", name, err)
+		}
+
+		return &UnikernelNetworkInfo{
+			TapDevice: name,
+			EthDevice: ifInfo,
+		}, nil
+	}
+
 	newTapName := strings.ReplaceAll(DefaultTap, "X", strconv.Itoa(tapIndex))
 	netlog.Debugf("creating tap device %s", newTapName)
 
