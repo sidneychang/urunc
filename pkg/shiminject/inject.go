@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/leases"
@@ -68,18 +69,30 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		address = defaultContainerd
 	}
 
+	start := time.Now()
 	client, err := containerd.New(address, containerd.WithDefaultNamespace(ns))
 	if err != nil {
 		return nil, fmt.Errorf("containerd client: %w", err)
 	}
+	log.WithFields(logrus.Fields{
+		"op":          "containerd.New",
+		"address":     address,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("containerd call completed")
 	defer client.Close()
 
 	// Fetch snapshot key/snapshotter directly from containerd.
 	store := client.ContainerService()
+	start = time.Now()
 	container, err := store.Get(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("get container %s: %w", containerID, err)
 	}
+	log.WithFields(logrus.Fields{
+		"op":          "ContainerService.Get",
+		"container":   containerID,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("containerd call completed")
 	snapshotKey := container.SnapshotKey
 	snapshotter := container.Snapshotter
 	if snapshotKey == "" || snapshotter == "" {
@@ -99,7 +112,17 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	originalKey := snapshotKey
 	// For devmapper, prefer committed parent snapshot when available.
 	if snapshotter == "devmapper" {
-		if info, err := ss.Stat(ctx, snapshotKey); err == nil && info.Parent != "" {
+		start = time.Now()
+		info, err := ss.Stat(ctx, snapshotKey)
+		if err == nil {
+			log.WithFields(logrus.Fields{
+				"op":          "SnapshotService.Stat",
+				"snapshotter": snapshotter,
+				"snapshot":    snapshotKey,
+				"duration_ms": time.Since(start).Milliseconds(),
+			}).Info("containerd call completed")
+		}
+		if err == nil && info.Parent != "" {
 			snapshotKey = info.Parent
 			log.WithFields(logrus.Fields{
 				"container":     containerID,
@@ -110,6 +133,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	}
 
 	viewKey := fmt.Sprintf("%s-urunc-view", containerID)
+	start = time.Now()
 	mounts, err := ss.View(ctx, viewKey, snapshotKey)
 	if err != nil {
 		// For devmapper we only support creating views from the committed
@@ -118,6 +142,13 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		// avoid relying on undefined snapshotter behaviour.
 		return nil, fmt.Errorf("failed to create snapshot view %s from %s: %w", viewKey, snapshotKey, err)
 	}
+	log.WithFields(logrus.Fields{
+		"op":          "SnapshotService.View",
+		"snapshotter": snapshotter,
+		"view_key":    viewKey,
+		"snapshot":    snapshotKey,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("containerd call completed")
 
 	viewMountPath := filepath.Join("/run/urunc/views", containerID)
 	if err := os.MkdirAll(viewMountPath, 0755); err != nil {
@@ -125,11 +156,18 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		return nil, fmt.Errorf("failed to create view mount directory %s: %w", viewMountPath, err)
 	}
 
+	start = time.Now()
 	if err := mount.All(mounts, viewMountPath); err != nil {
 		_ = os.RemoveAll(viewMountPath)
 		_ = ss.Remove(ctx, viewKey)
 		return nil, fmt.Errorf("failed to mount snapshot view at %s: %w", viewMountPath, err)
 	}
+	log.WithFields(logrus.Fields{
+		"op":          "mount.All",
+		"mount_path":  viewMountPath,
+		"view_key":    viewKey,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("snapshot view mounted")
 
 	log.WithFields(logrus.Fields{
 		"container":    containerID,
@@ -143,6 +181,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	// Protect the snapshot view from GC by attaching it to a lease.
 	var leaseID string
 	if ls := client.LeasesService(); ls != nil {
+		start = time.Now()
 		lease, lerr := ls.Create(ctx,
 			leases.WithRandomID(),
 			leases.WithLabels(map[string]string{
@@ -152,12 +191,20 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 				"com.urunc.snapshot.view.snapper": snapshotter,
 			}),
 		)
+		if lerr == nil {
+			log.WithFields(logrus.Fields{
+				"op":          "LeasesService.Create",
+				"view_key":    viewKey,
+				"duration_ms": time.Since(start).Milliseconds(),
+			}).Info("containerd call completed")
+		}
 		if lerr != nil {
 			log.WithError(lerr).WithFields(logrus.Fields{
 				"container": containerID,
 				"view_key":  viewKey,
 			}).Warn("failed to create lease for snapshot view; GC may clean it up early")
 		} else {
+			start = time.Now()
 			if rerr := ls.AddResource(ctx, lease, leases.Resource{
 				ID:   viewKey,
 				Type: "snapshots/" + snapshotter,
@@ -167,6 +214,11 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 					"view_key":  viewKey,
 				}).Warn("failed to attach snapshot view to lease; GC may clean it up early")
 			} else {
+				log.WithFields(logrus.Fields{
+					"op":          "LeasesService.AddResource",
+					"view_key":    viewKey,
+					"duration_ms": time.Since(start).Milliseconds(),
+				}).Info("containerd call completed")
 				leaseID = lease.ID
 				log.WithFields(logrus.Fields{
 					"container": containerID,
@@ -180,6 +232,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	// Inject ONLY the view mount path into config.json annotations so urunc can
 	// bind-mount unikernel/initrd/urunc.json from there without any file copies.
 	configPath := filepath.Join(bundle, configFilename)
+	start = time.Now()
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", configPath, err)
@@ -199,6 +252,12 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	if err := os.WriteFile(configPath, out, 0644); err != nil {
 		return nil, fmt.Errorf("write %s: %w", configPath, err)
 	}
+	log.WithFields(logrus.Fields{
+		"op":          "config.json.update",
+		"bundle":      bundle,
+		"container":   containerID,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("injected snapshot view mount path into config.json")
 
 	return &SnapshotViewInfo{
 		ViewKey:     viewKey,
@@ -238,21 +297,34 @@ func CleanupSnapshotView(ctx context.Context, info *SnapshotViewInfo) error {
 		if address == "" {
 			address = defaultContainerd
 		}
+		start := time.Now()
 		client, err := containerd.New(address, containerd.WithDefaultNamespace(info.Namespace))
 		if err != nil {
 			log.WithError(err).Warn("failed to connect to containerd for snapshot view cleanup")
 			return firstErr
 		}
+		log.WithFields(logrus.Fields{
+			"op":          "containerd.New",
+			"address":     address,
+			"duration_ms": time.Since(start).Milliseconds(),
+		}).Info("containerd call completed")
 		defer client.Close()
 
 		ss := client.SnapshotService(info.Snapshotter)
 		if ss != nil {
+			start = time.Now()
 			if err := ss.Remove(ctx, info.ViewKey); err != nil {
 				log.WithError(err).WithField("view_key", info.ViewKey).Warn("failed to remove snapshot view from containerd")
 				if firstErr == nil {
 					firstErr = err
 				}
 			} else {
+				log.WithFields(logrus.Fields{
+					"op":          "SnapshotService.Remove",
+					"snapshotter": info.Snapshotter,
+					"view_key":    info.ViewKey,
+					"duration_ms": time.Since(start).Milliseconds(),
+				}).Info("containerd call completed")
 				log.WithField("view_key", info.ViewKey).Info("removed snapshot view from containerd")
 			}
 		}
@@ -260,12 +332,18 @@ func CleanupSnapshotView(ctx context.Context, info *SnapshotViewInfo) error {
 		// Best-effort: delete the lease that was protecting this snapshot view.
 		if info.LeaseID != "" {
 			if ls := client.LeasesService(); ls != nil {
+				start = time.Now()
 				if err := ls.Delete(ctx, leases.Lease{ID: info.LeaseID}); err != nil {
 					log.WithError(err).WithField("lease_id", info.LeaseID).Warn("failed to delete snapshot view lease")
 					if firstErr == nil {
 						firstErr = err
 					}
 				} else {
+					log.WithFields(logrus.Fields{
+						"op":          "LeasesService.Delete",
+						"lease_id":    info.LeaseID,
+						"duration_ms": time.Since(start).Milliseconds(),
+					}).Info("containerd call completed")
 					log.WithField("lease_id", info.LeaseID).Info("deleted snapshot view lease")
 				}
 			}
