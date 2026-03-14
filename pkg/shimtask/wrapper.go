@@ -20,6 +20,7 @@ package shimtask
 
 import (
 	"context"
+	"time"
 
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v2"
 	ptypes "github.com/containerd/containerd/protobuf/types"
@@ -38,14 +39,26 @@ type wrapper struct {
 }
 
 func (w *wrapper) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*taskAPI.CreateTaskResponse, error) {
+	start := time.Now()
 	view, err := shiminject.CreateSnapshotView(ctx, r.Bundle, r.ID)
+	log.WithFields(logrus.Fields{
+		"op":          "CreateSnapshotView",
+		"id":          r.ID,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("shim step completed")
 	if err != nil {
 		log.WithError(err).WithField("id", r.ID).Warn("create snapshot view failed, continuing without")
 	} else {
 		w.viewInfo = view
 	}
 
+	start = time.Now()
 	resp, err := w.inner.Create(ctx, r)
+	log.WithFields(logrus.Fields{
+		"op":          "inner.Create",
+		"id":          r.ID,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("shim step completed")
 	if err != nil && w.viewInfo != nil {
 		// Best-effort cleanup if inner Create fails
 		if cerr := shiminject.CleanupSnapshotView(ctx, w.viewInfo); cerr != nil {
@@ -116,4 +129,3 @@ func (w *wrapper) RegisterTTRPC(server *ttrpc.Server) error {
 	taskAPI.RegisterTaskService(server, w)
 	return nil
 }
-
