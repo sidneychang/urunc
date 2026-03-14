@@ -171,7 +171,17 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	viewDataDir := filepath.Join(viewBase, sharedViewsData)
 	viewUsersDir := filepath.Join(viewBase, sharedViewsUsers)
 	lockPath := viewBase + sharedViewsLock
+	useParentMounts := true
 	viewKey := "urunc-shared-" + viewID
+	if useParentMounts {
+		// Use the parent snapshot directly (no view snapshot registration).
+		viewKey = snapshotKey
+		log.WithFields(logrus.Fields{
+			"container":   containerID,
+			"snapshotter": snapshotter,
+			"snapshot":    snapshotKey,
+		}).Info("Using parent snapshot mounts directly (no snapshot view registration)")
+	}
 
 	if err := os.MkdirAll(sharedViewsRoot, 0755); err != nil {
 		return nil, fmt.Errorf("create shared views root %s: %w", sharedViewsRoot, err)
@@ -212,32 +222,50 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		log.WithError(mntErr).WithField("path", viewDataDir).Warn("failed to check mountpoint status")
 	}
 	if !mounted {
-		// Ensure a shared containerd view snapshot exists (create or reuse).
+		// Ensure a shared containerd view snapshot exists (create or reuse),
+		// or use parent snapshot mounts directly if configured.
 		var mounts []mount.Mount
 		start = time.Now()
-		mounts, err = ss.View(ctx, viewKey, snapshotKey)
-		if err != nil {
-			if !errdefs.IsAlreadyExists(err) {
-				return nil, fmt.Errorf("failed to create shared view snapshot %s from %s: %w", viewKey, snapshotKey, err)
-			}
-			mounts, err = ss.Mounts(ctx, viewKey)
+		if useParentMounts {
+			mounts, err = ss.Mounts(ctx, snapshotKey)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get mounts for shared view snapshot %s: %w", viewKey, err)
+				log.WithError(err).WithField("snapshot", snapshotKey).Warn("failed to get mounts for parent snapshot")
+				return nil, fmt.Errorf("failed to get mounts for parent snapshot %s: %w", snapshotKey, err)
 			}
+			log.WithFields(logrus.Fields{
+				"mounts": mounts,
+			}).Info("mounts for parent snapshot")
 			log.WithFields(logrus.Fields{
 				"op":          "SnapshotService.Mounts",
 				"snapshotter": snapshotter,
-				"snapshot":    viewKey,
-				"duration_ms": time.Since(start).Milliseconds(),
-			}).Info("containerd call completed")
-		} else {
-			log.WithFields(logrus.Fields{
-				"op":          "SnapshotService.View",
-				"snapshotter": snapshotter,
-				"view_key":    viewKey,
 				"snapshot":    snapshotKey,
 				"duration_ms": time.Since(start).Milliseconds(),
 			}).Info("containerd call completed")
+		} else {
+			mounts, err = ss.View(ctx, viewKey, snapshotKey)
+			if err != nil {
+				if !errdefs.IsAlreadyExists(err) {
+					return nil, fmt.Errorf("failed to create shared view snapshot %s from %s: %w", viewKey, snapshotKey, err)
+				}
+				mounts, err = ss.Mounts(ctx, viewKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get mounts for shared view snapshot %s: %w", viewKey, err)
+				}
+				log.WithFields(logrus.Fields{
+					"op":          "SnapshotService.Mounts",
+					"snapshotter": snapshotter,
+					"snapshot":    viewKey,
+					"duration_ms": time.Since(start).Milliseconds(),
+				}).Info("containerd call completed")
+			} else {
+				log.WithFields(logrus.Fields{
+					"op":          "SnapshotService.View",
+					"snapshotter": snapshotter,
+					"view_key":    viewKey,
+					"snapshot":    snapshotKey,
+					"duration_ms": time.Since(start).Milliseconds(),
+				}).Info("containerd call completed")
+			}
 		}
 
 		start = time.Now()
