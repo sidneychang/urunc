@@ -46,7 +46,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return &wrapper{inner: inner}, nil
+			return &wrapper{TaskService: inner}, nil
 		},
 	})
 }

@@ -28,13 +28,12 @@ import (
 
 // rootfsSelector encapsulates the context for rootfs selection
 type rootfsSelector struct {
-	bundle      string
-	cntrRootfs  string
-	containerID string
-	annot       map[string]string
-	unikernel   types.Unikernel
-	vmm         types.VMM
-	vfsdPath    string
+	bundle     string
+	cntrRootfs string
+	annot      map[string]string
+	unikernel  types.Unikernel
+	vmm        types.VMM
+	vfsdPath   string
 }
 
 // newRootfsResult creates a RootfsParams with common defaults
@@ -114,9 +113,8 @@ func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
 
 	if viewMountPath != "" {
 		uniklog.WithFields(logrus.Fields{
-			"container_id": rs.containerID,
-			"view_mount":   viewMountPath,
-			"cntr_rootfs":  rs.cntrRootfs,
+			"view_mount":  viewMountPath,
+			"cntr_rootfs": rs.cntrRootfs,
 		}).Info("Using pre-created snapshot view for container rootfs (shim-managed, read-only, no copy)")
 
 		// Discover the active rootfs block device; this is what we will pass
@@ -263,17 +261,16 @@ func switchMonRootfs(res types.RootfsParams, bundle string) (types.RootfsParams,
 //  3. Container rootfs as block device (if MountRootfs=true and supported)
 //  4. Container rootfs as shared-fs: virtiofs > 9pfs (if MountRootfs=true and supported)
 //  5. No rootfs
-func chooseRootfs(bundle string, cntrRootfs string, containerID string, annot map[string]string,
+func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
 	unikernel types.Unikernel, vmm types.VMM, vfsdPath string) (types.RootfsParams, error) {
 
 	selector := &rootfsSelector{
-		bundle:      bundle,
-		cntrRootfs:  cntrRootfs,
-		containerID: containerID,
-		annot:       annot,
-		unikernel:   unikernel,
-		vmm:         vmm,
-		vfsdPath:    vfsdPath,
+		bundle:     bundle,
+		cntrRootfs: cntrRootfs,
+		annot:      annot,
+		unikernel:  unikernel,
+		vmm:        vmm,
+		vfsdPath:   vfsdPath,
 	}
 
 	// Priority 1: Initrd

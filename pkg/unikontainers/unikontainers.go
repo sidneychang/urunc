@@ -345,7 +345,7 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 	// if the respective annotation is set then, depending on the guest
 	// (supports block or 9pfs), it will use the supported option. In case
 	// both ae supported, then the block option will be used by default.
-	rootfsParams, err := chooseRootfs(bundleDir, rootfsDir, u.State.ID, u.State.Annotations, unikernel, vmm, virtiofsdConfig.Path)
+	rootfsParams, err := chooseRootfs(bundleDir, rootfsDir, u.State.Annotations, unikernel, vmm, virtiofsdConfig.Path)
 	if err != nil {
 		uniklog.Errorf("could not choose guest rootfs: %v", err)
 		return err
