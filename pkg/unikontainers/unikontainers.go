@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/urunc-dev/urunc/pkg/network"
 	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
@@ -639,6 +640,12 @@ func (u *Unikontainer) Kill() error {
 // by these bind mounts when the shim later unmounts the view and deactivates
 // the thin device.
 func (u *Unikontainer) cleanupSnapshotViewBindMounts() {
+	fields := logrus.Fields{}
+	if u.State != nil {
+		fields["container_id"] = u.State.ID
+	}
+	timer := startPhaseTimer("unikontainers.delete.cleanup_snapshot_view_bind_mounts", fields)
+	defer timer.done(nil)
 	// Only relevant when a snapshot view mount path was injected by the shim.
 	if u.State == nil {
 		return
@@ -672,16 +679,30 @@ func (u *Unikontainer) cleanupSnapshotViewBindMounts() {
 	targets = append(targets, filepath.Join(monRootfs, uruncJSONFilename))
 
 	for _, t := range targets {
+		unmountStart := time.Now()
 		if err := unix.Unmount(t, 0); err != nil {
 			// Ignore non-mount or missing-path cases; they simply mean there is
 			// nothing to clean up for this target in this namespace.
 			if err == unix.EINVAL || err == unix.ENOENT {
+				logPhaseDuration("unikontainers.delete.cleanup_snapshot_view_bind_mount.single", time.Since(unmountStart), logrus.Fields{
+					"container_id": u.State.ID,
+					"path":         t,
+					"skipped":      true,
+				}, nil)
 				continue
 			}
 			uniklog.WithError(err).WithField("path", t).Warn("failed to unmount snapshot view bind mount")
+			logPhaseDuration("unikontainers.delete.cleanup_snapshot_view_bind_mount.single", time.Since(unmountStart), logrus.Fields{
+				"container_id": u.State.ID,
+				"path":         t,
+			}, err)
 			continue
 		}
 		uniklog.WithField("path", t).Debug("unmounted snapshot view bind mount")
+		logPhaseDuration("unikontainers.delete.cleanup_snapshot_view_bind_mount.single", time.Since(unmountStart), logrus.Fields{
+			"container_id": u.State.ID,
+			"path":         t,
+		}, nil)
 	}
 }
 

@@ -33,3 +33,5 @@ bundles/
 __pycache__/
 
 bunny/
+
+.codex

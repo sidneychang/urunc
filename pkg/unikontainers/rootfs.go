@@ -101,6 +101,10 @@ func (rs *rootfsSelector) shouldMountContainerRootfs() bool {
 // for guest's rootfs. It first tries to use a snapshot view if enabled, otherwise
 // falls back to the direct block device approach.
 func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
+	timer := startPhaseTimer("unikontainers.rootfs.try_container_block", logrus.Fields{
+		"cntr_rootfs": rs.cntrRootfs,
+	})
+	defer timer.done(nil)
 	if !rs.unikernel.SupportsBlock() {
 		return types.RootfsParams{}, false
 	}
@@ -263,6 +267,12 @@ func switchMonRootfs(res types.RootfsParams, bundle string) (types.RootfsParams,
 //  5. No rootfs
 func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
 	unikernel types.Unikernel, vmm types.VMM, vfsdPath string) (types.RootfsParams, error) {
+	timer := startPhaseTimer("unikontainers.rootfs.choose", logrus.Fields{
+		"bundle":      bundle,
+		"cntr_rootfs": cntrRootfs,
+	})
+	var retErr error
+	defer func() { timer.done(retErr) }()
 
 	selector := &rootfsSelector{
 		bundle:     bundle,
@@ -288,11 +298,13 @@ func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
 	// Priority 3 & 4: Container rootfs (block or shared-fs)
 	result, ok = selector.tryContainerRootfs()
 	if ok {
-		return switchMonRootfs(result, bundle)
+		result, retErr = switchMonRootfs(result, bundle)
+		return result, retErr
 	}
 
 	if selector.shouldMountContainerRootfs() {
-		return types.RootfsParams{}, fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
+		retErr = fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
+		return types.RootfsParams{}, retErr
 	}
 
 	uniklog.Info("no rootfs configured for guest")

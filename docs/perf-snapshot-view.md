@@ -1,90 +1,76 @@
-## devmapper snapshot view 性能记录（view vs non‑view）
+## devmapper snapshot view 测试前环境清理说明
 
-### 测试环境与前置条件
+这份文档只保留测试前的环境清理方法，不保留历史实验数据。
 
-- **OS**: Ubuntu 22.04（内核 5.15）
-- **containerd**: 使用 `devmapper` snapshotter
-- **镜像**: `harbor.nbfc.io/nubificus/urunc/nginx-qemu-linux-raw:latest`
-- **测量方式**: `/usr/bin/time -f "%e"` 包裹 `sudo nerdctl run -d ...`，统计单次容器启动耗时（unikernel 起 VM 冷启动）
-- **脚本**:
-  - **no view**: `scripts/perf/run_noview.sh`（`RUNTIME=io.containerd.uruncnv.v2`）
-  - **view**: `scripts/perf/run_view.sh`（`RUNTIME=io.containerd.uruncv.v2`）
-  - 公共参数：`SNAPSHOTTER=devmapper`, `RUNS=10`, `SLEEP=2`
+### 目标
 
-### containerd 配置方式（与本次测试相关的部分）
+在每次启动测试前，尽量把和 `nerdctl + urunc + devmapper` 相关的旧状态清掉，避免上一次测试的容器、shim、task 或 snapshot 影响下一次结果。
 
-- **devmapper snapshotter**（节选，自 `docs/installation.md`）：
+### 推荐做法
 
-```toml
-[plugins.'io.containerd.snapshotter.v1.devmapper']
-  pool_name = "containerd-pool"
-  root_path = "/var/lib/containerd/io.containerd.snapshotter.v1.devmapper"
-  base_image_size = "10GB"
-  discard_blocks = true
-  fs_type = "ext2"
+每次测试前先运行：
+
+```bash
+NS=<benchmark-namespace> PRUNE_IMAGES=1 scripts/perf/reset_urunc_bench_state.sh
 ```
 
-- **urunc 相关 runtime（低层 runtime v2 入口）**：
+建议使用较短的 benchmark namespace，例如：
 
-```toml
-[plugins.'io.containerd.runtime.v2.task'.io.containerd.uruncv.v2]
-  # 使用 urunc 提供的 shim
-  runtime_type = "io.containerd.urunc.v2"
-
-[plugins.'io.containerd.runtime.v2.task'.io.containerd.uruncnv.v2]
-  # 同样的 shim，只是禁用 snapshot view 的变体
-  runtime_type = "io.containerd.urunc.v2"
+```bash
+NS=ub PRUNE_IMAGES=1 scripts/perf/reset_urunc_bench_state.sh
 ```
 
-- **（可选）CRI 层 urunc runtime（如需通过 Kubernetes 使用）**：
+`NS` 建议保持较短，是因为 `urunc` 在 `/run/containerd/...` 下创建 Unix socket，namespace 过长时可能触发路径长度问题。
 
-```toml
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.urunc]
-  runtime_type = "io.containerd.urunc.v2"
-  container_annotations = ["com.urunc.unikernel.*"]
-  pod_annotations       = ["com.urunc.unikernel.*"]
-  snapshotter           = "devmapper"
+### 清理脚本会做什么
+
+[`scripts/perf/reset_urunc_bench_state.sh`](../scripts/perf/reset_urunc_bench_state.sh)
+会清理以下内容：
+
+- 指定 namespace 下的 `io.containerd.urunc.v2` 容器
+- 指定 namespace 下的 task
+- 指定 namespace 下残留的 `containerd-shim-urunc-v2`
+- 这些 shim 的子进程
+- 指定 namespace 下 `devmapper` snapshotter 的 active snapshot
+- 当 `PRUNE_IMAGES=1` 时，也尝试删除该 namespace 下不再需要的 committed snapshot 与镜像引用
+
+脚本最后会输出：
+
+- `remaining_containers`
+- `remaining_tasks`
+- `remaining_shims`
+- `remaining_snapshots`
+- `global_dmsetup_devices`
+
+这些字段可以作为“本轮测试前环境是否清干净”的快速检查项。
+
+### 建议的测试前检查
+
+执行 reset 后，建议至少确认：
+
+```bash
+ctr -n <benchmark-namespace> c ls
+ctr -n <benchmark-namespace> tasks ls
+ctr -n <benchmark-namespace> snapshots --snapshotter devmapper ls
+dmsetup ls
 ```
 
-> 说明：benchmark 中直接用 `nerdctl --runtime io.containerd.urunc{v,nv}.v2 --snapshotter devmapper`，因此关键在于 `runtime.v2.task` 段和 devmapper 配置。
+理想状态是：
 
-### 修改前的基线结果（初始 view 实现）
+- benchmark namespace 下没有容器
+- benchmark namespace 下没有 task
+- benchmark namespace 下没有 `devmapper` snapshot
+- `dmsetup ls` 只剩池本身和系统盘映射
 
-- **脚本参数**: `RUNS=10`, `SLEEP=2`
-- **no view（io.containerd.uruncnv.v2）**：
-  - 单次 run 耗时（秒）：`1.04, 1.33, 1.98, 2.29, 2.35, 2.70, 3.08, 3.15, 3.58, 3.72`
-  - **粗略均值**: 约 2.5–2.6 s
-- **view（io.containerd.uruncv.v2，启用 containerd snapshot view）**：
-  - 单次 run 耗时（秒）：`4.84, 4.30, 4.47, 4.99, 5.07, 5.27, 5.62, 5.69, 6.41, 6.63`
-  - **粗略均值**: 约 5.3–5.5 s
-- **现象**：
-  - view 路径比 non‑view 明显更慢（约 2 倍启动时延），
-  - 瓶颈主要在 shim 端每次 `CreateSnapshotView` 都新建 containerd client + devmapper view + mount + lease 的固定开销。
+### 相关脚本
 
-### 修改后的结果（shim 复用 containerd client 之后）
+- [`scripts/perf/reset_urunc_bench_state.sh`](../scripts/perf/reset_urunc_bench_state.sh)
+- [`scripts/perf/run_noview.sh`](../scripts/perf/run_noview.sh)
+- [`scripts/perf/run_view.sh`](../scripts/perf/run_view.sh)
 
-修改点（提交 93bcb9b8 之后）：
-
-- **在 `pkg/shiminject/inject.go` 中增加进程级共享 client**：
-  - 使用 `sync.Once` 初始化一次 `containerd.New(...)`。
-  - `CreateSnapshotView` 和 `CleanupSnapshotView` 都通过 `getContainerdClient()` 复用该 client。
-  - 每次调用时用 `namespaces.WithNamespace(ctx, ...)` 在同一个 client 上切换 namespace。
-
-在相同环境和脚本参数下重新跑：
-
-- **no view（io.containerd.uruncnv.v2）**：
-  - 单次 run 耗时（秒）：`0.89, 0.85, 0.85, 0.93, 0.99, 0.97, 0.89, 0.87, 0.96, 0.85`
-  - **粗略均值**: 约 0.9 s
-- **view（io.containerd.uruncv.v2）**：
-  - 单次 run 耗时（秒）：`1.20, 1.29, 1.28, 1.18, 1.06, 1.09, 1.09, 1.24, 1.11, 1.09`
-  - **粗略均值**: 约 1.1–1.2 s
-
-### 当前结论（仅针对短生命周期 benchmark）
-
-- **两条路径都因优化受益明显**：整体启动时延从数秒级下降到 ~1 秒级。
-- **view 仍然略慢于 non‑view（~1.2 s vs ~0.9 s）**：
-  - 减少了每次新建 client 的开销，但 devmapper `View + mount + lease` 本身仍是固定成本。
-  - 对于这种“起容器就立刻停掉”的短生命周期测试，这部分固定开销仍然足以让 view 稍慢于 non‑view。
+其中 `run_noview.sh` 和 `run_view.sh` 已接入测试前后的 reset 流程，可作为后续重新整理 benchmark 时的基础脚本。
+  - 首次 shared view 创建过重；
+  - 后续请求即使不拿锁，也必须等待该 view 真正 ready。
 
 ### view 实现的耗时拆解（基于一次典型 run 的日志）
 
@@ -186,3 +172,131 @@ view 的优势更适合以下场景：
 
 这些补充测试有助于更全面地回答一个问题：**在真实生产工作负载中，引入 view 是否能显著改善存储行为和长期运行特性，而不仅仅是对“单次短启动时延”的微调。**
 
+### 2026-03-28 补充实验：main vs cherry-main 的并发 / warm 启动
+
+本轮补充实验针对用户关心的两条构建路径：
+
+- **no-view**：`main` 分支，执行 `go mod vendor && make install`
+- **view**：`cherry-main` 分支，执行 `go mod vendor && make install`
+
+实验约束与说明：
+
+- 镜像仍为 `harbor.nbfc.io/nubificus/urunc/nginx-qemu-linux-raw:latest`
+- snapshotter 仍为 `devmapper`
+- 记录的是 `nerdctl run -d ...` 返回的 wall-clock 时间
+- **镜像拉取不计入计时**：每轮开始前先确认镜像已在本地，避免把首次 pull 算进启动时间
+- **并发启动**：同时发起 `N` 个 `nerdctl run -d`
+- **warm 启动**：先启动 1 个 keeper 容器保持不退出，随后顺序启动 `N` 个容器，每个容器启动完成后立刻删除
+- 由于该机器上存在活跃的 `k8s.io` namespace workload，本轮只清理 `default` namespace 中带测试前缀的容器，不做全局清理
+- 如果某一档测试在 **5 分钟内没有完成**，则该档记为 `skipped`
+
+#### 当前已确认可用的数据
+
+##### no-view（main）
+
+- **并发 10**
+  - 批次总耗时：`32013 ms`
+  - 单容器返回：`n=10, avg=23146.70 ms, min=13894 ms, max=32004 ms`
+- **并发 32**
+  - 批次总耗时：`105729 ms`
+  - 单容器返回：`n=32, avg=70732.25 ms, min=31623 ms, max=105713 ms`
+- **并发 64**
+  - 批次总耗时：`218700 ms`
+  - 单容器返回：`n=64, avg=146028.59 ms, min=64419 ms, max=218677 ms`
+- **warm 10**
+  - 单容器返回：`n=10, avg=5075.10 ms, min=3947 ms, max=6233 ms`
+- **warm 32**
+  - 单容器返回：`n=32, avg=4399.06 ms, min=4071 ms, max=5164 ms`
+
+##### view（cherry-main）
+
+- **并发 10**
+  - 批次总耗时：`32034 ms`
+  - 单容器返回：`n=10, avg=28105.10 ms, min=20851 ms, max=32024 ms`
+- **并发 32**
+  - 批次总耗时：`123588 ms`
+  - 单容器返回：`n=32, avg=78475.84 ms, min=42105 ms, max=123575 ms`
+- **并发 64**
+  - 批次总耗时：`121784 ms`
+  - 单容器返回：`n=64, avg=111487.77 ms, min=77008 ms, max=121761 ms`
+- **warm 10**
+  - 单容器返回：`n=10, avg=9920.00 ms, min=8845 ms, max=11334 ms`
+
+#### 超时 / 部分完成的数据
+
+- **no-view warm 64**
+  - 5 分钟超时前完成 `50/64`
+  - 已收样本平均：`4415.80 ms`
+- **no-view 并发 128**
+  - 5 分钟超时前完成 `75/128`
+  - 已收样本平均：`209824.52 ms`
+- **view 并发 128**
+  - 5 分钟超时前完成 `76/128`
+  - 已收样本平均：`216509.91 ms`
+- **view warm 32**
+  - 5 分钟超时前完成 `27/32`
+  - 已收样本平均：`9246.59 ms`
+- **view warm 64**
+  - 5 分钟超时前完成 `26/64`
+  - 已收样本平均：`9745.50 ms`
+
+#### 当前对这些数据的解读边界
+
+- `view` 的 **并发 64** 结果文件已经确认有 **64 个唯一容器名** 和 **64 个唯一容器 ID**，因此可以确认这 64 个 `run -d` 都返回完成了
+- 但是，**不能仅凭当前这批数据就下结论说 view 在 64 并发下明显优于 no-view**
+- 原因是：
+  - `view 64` 这轮是在后半段用更严格、单配置、5 分钟封顶的流程跑出来的
+  - `no-view 64` 则来自更早一轮较“脏”的批量跑法，中间经历过并发清理与残留干扰
+- 因此，当前更稳妥的表述应是：
+  - **观察到** `view 64` 的 `run -d` 返回时间低于当前手里的 `no-view 64`
+  - 但要把它上升为结论，仍需要在更隔离、更一致的环境里重跑 `no-view 64` 做严格对照
+
+#### 当前缺失项
+
+- `view warm 128`
+- `view` 路径在本轮规模下的 phase/timestamp 归因分析
+
+后续如果能在不承载现有 `k8s.io` workload 的隔离节点上继续测试，建议优先补齐：
+
+- `view warm 10 / 32 / 64`
+- `no-view 64` 的干净重跑
+- `URUNC_PROFILE_STARTUP=1` 下的 `view` 并发与 warm 拆解
+
+### 2026-03-28 补充实验（二）：每轮前全量清理 urunc/devmapper 运行态后的 view warm
+
+在用户确认“可以影响当前 k8s/urunc workload”后，又补做了一轮更激进的
+`cherry-main / view` warm 启动实验。和上面的测试相比，这一轮在**每个测试前**
+都执行了更强的 reset：
+
+- `systemctl stop kubelet`
+- 删除 `default` 与 `k8s.io` namespace 中所有 `io.containerd.urunc.v2` 容器
+- 杀掉宿主机上残留的 `containerd-shim-urunc-v2`、`urunc`、`/opt/urunc/bin/qemu-system`、`firecracker`、`cloud-hypervisor`
+- 卸载 `/run/urunc/*` 下的挂载
+- `systemctl restart containerd`
+- 确认镜像已在本地后，再开始计时
+
+测试结束后，已重新执行：
+
+```bash
+sudo systemctl start kubelet
+```
+
+#### full-reset 下的 view warm 结果
+
+- **warm 10**
+  - 单容器返回：`n=10, avg=4350.80 ms, median=4257.50 ms, min=4037 ms, max=4708 ms`
+- **warm 32**
+  - 单容器返回：`n=32, avg=3811.16 ms, median=4345.00 ms, min=496 ms, max=11450 ms`
+- **warm 64**
+  - 单容器返回：`n=64, avg=4296.70 ms, median=4224.50 ms, min=3869 ms, max=6433 ms`
+
+#### 对这轮 full-reset warm 结果的观察
+
+- 和前一轮“不做全量 reset”的 `view warm 10`（约 `9.9 s`）相比，这一轮 `warm 10`
+  明显下降到约 `4.35 s`
+- 这说明在当前机器上，**测试前遗留的 urunc/containerd/devmapper 运行态**会显著影响 warm 启动结果
+- `warm 32` 中出现了一组异常低值（`496/502/515/531/545 ms`），因此这一档不能只看均值：
+  - 均值：`3811.16 ms`
+  - 中位数：`4345.00 ms`
+- 从中位数看，`warm 10 / 32 / 64` 三档在这轮 full-reset 条件下都大致落在 **4.2–4.3 s**
+  左右，没有随着规模线性恶化
