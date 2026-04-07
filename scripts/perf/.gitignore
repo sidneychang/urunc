@@ -1,0 +1,8 @@
+# Raw benchmark output and plots (scripts/perf/data)
+data/**/*.tsv
+data/**/*.png
+
+# Generated summaries / reports from analyze_*.py or manual runs
+data/**/analysis*.txt
+data/**/analysis_summary.txt
+data/**/*_REPORT.md

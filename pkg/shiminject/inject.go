@@ -18,20 +18,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/containerd/containerd"
+	containersapi "github.com/containerd/containerd/api/services/containers/v1"
+	leasesapi "github.com/containerd/containerd/api/services/leases/v1"
+	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
+	"github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/snapshots"
 	"github.com/moby/sys/mountinfo"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -48,6 +52,8 @@ const (
 	sharedViewLeaseID = "urunc-shared-view-"
 	sharedViewWait    = 10 * time.Millisecond
 	sharedViewTimeout = 5 * time.Second
+	// experiment toggle: when true, do not create a containerd client at all.
+	disableSharedSnapshotViewCreate = false
 )
 
 var log = logrus.WithField("subsystem", "shiminject")
@@ -95,20 +101,64 @@ func containerdAddress() string {
 	return defaultContainerd
 }
 
-// newContainerdClient dials containerd scoped to the given namespace.
-func newContainerdClient(ns string) (*containerd.Client, error) {
+type containerdClients struct {
+	conn       *grpc.ClientConn
+	snapshots  snapshotsapi.SnapshotsClient
+	leases     leasesapi.LeasesClient
+	containers containersapi.ContainersClient
+}
+
+func withNamespace(ctx context.Context, ns string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "containerd-namespace", ns)
+}
+
+func grpcErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errdefs.FromGRPC(err)
+}
+
+func (c *containerdClients) containersClient() containersapi.ContainersClient {
+	if c.containers == nil {
+		c.containers = containersapi.NewContainersClient(c.conn)
+	}
+	return c.containers
+}
+
+// newContainerdClient dials containerd gRPC and creates only required service clients.
+func newContainerdClient(ns string) (*containerdClients, error) {
 	addr := containerdAddress()
 	start := time.Now()
-	client, err := containerd.New(addr, containerd.WithDefaultNamespace(ns))
+	conn, err := grpc.NewClient(
+		"unix://"+addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDisableServiceConfig(),
+		grpc.WithDisableRetry(),
+		grpc.WithContextDialer(func(ctx context.Context, target string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", addr)
+		}),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("containerd client: %w", err)
+		return nil, fmt.Errorf("containerd grpc client: %w", err)
 	}
 	log.WithFields(logrus.Fields{
-		"op":          "containerd.New",
+		"op":          "grpc.NewClient",
 		"address":     addr,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("containerd call completed")
-	return client, nil
+	}).Debug("containerd call completed")
+	return &containerdClients{
+		conn:      conn,
+		snapshots: snapshotsapi.NewSnapshotsClient(conn),
+		leases:    leasesapi.NewLeasesClient(conn),
+	}, nil
+}
+
+func (c *containerdClients) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
 
 // acquireSharedViewLock opens (or creates) the per-shared-view lock file and
@@ -150,25 +200,50 @@ func acquireSharedViewLock(lockPath string) (*os.File, func(), error) {
 // the effective snapshot key and snapshotter. For devmapper it transparently
 // substitutes the committed parent snapshot when one exists.
 // Both return values are empty strings when the container carries no snapshot.
-func resolveSnapshotKey(ctx context.Context, client *containerd.Client, containerID string) (snapshotKey, snapshotter string, err error) {
+func resolveSnapshotKey(ctx context.Context, client *containerdClients, ns, containerID string) (snapshotKey, snapshotter string, err error) {
 	timer := startPhaseTimer("shiminject.resolve_snapshot_key.total", logrus.Fields{
 		"container": containerID,
 	})
 	defer func() { timer.done(err) }()
-	store := client.ContainerService()
-	start := time.Now()
-	ctr, err := store.Get(ctx, containerID)
-	if err != nil {
-		return "", "", fmt.Errorf("get container %s: %w", containerID, err)
+	// Fast path: for devmapper and some snapshotters, active snapshot key equals
+	// container ID. Probe common snapshotters first to avoid Containers.Get path.
+	fastResolved := false
+	for _, cand := range []string{"devmapper", "overlayfs", "blockfile"} {
+		_, serr := client.snapshots.Stat(withNamespace(ctx, ns), &snapshotsapi.StatSnapshotRequest{
+			Snapshotter: cand,
+			Key:         containerID,
+		})
+		if grpcErr(serr) == nil {
+			snapshotKey = containerID
+			snapshotter = cand
+			log.WithFields(logrus.Fields{
+				"container":    containerID,
+				"snapshot_key": snapshotKey,
+				"snapshotter":  snapshotter,
+			}).Debug("resolved snapshot via fast stat(containerID) path")
+			fastResolved = true
+			break
+		}
 	}
-	log.WithFields(logrus.Fields{
-		"op":          "ContainerService.Get",
-		"container":   containerID,
-		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("containerd call completed")
 
-	snapshotKey = ctr.SnapshotKey
-	snapshotter = ctr.Snapshotter
+	if !fastResolved {
+		start := time.Now()
+		ctrResp, gerr := client.containersClient().Get(withNamespace(ctx, ns), &containersapi.GetContainerRequest{ID: containerID})
+		if gerr != nil {
+			return "", "", fmt.Errorf("get container %s: %w", containerID, grpcErr(gerr))
+		}
+		log.WithFields(logrus.Fields{
+			"op":          "ContainerService.Get",
+			"container":   containerID,
+			"duration_ms": time.Since(start).Milliseconds(),
+		}).Debug("containerd call completed")
+		ctr := ctrResp.GetContainer()
+		if ctr == nil {
+			return "", "", fmt.Errorf("container %s not found in response", containerID)
+		}
+		snapshotKey = ctr.GetSnapshotKey()
+		snapshotter = ctr.GetSnapshotter()
+	}
 	log.WithFields(logrus.Fields{
 		"container":    containerID,
 		"snapshot_key": snapshotKey,
@@ -191,18 +266,19 @@ func resolveSnapshotKey(ctx context.Context, client *containerd.Client, containe
 	// committed snapshot". Walk up the parent chain until we find a committed
 	// snapshot and use that as the effective key for the shared view.
 	if snapshotter == "devmapper" {
-		ss := client.SnapshotService(snapshotter)
-
 		// For devmapper, the container's snapshotKey may itself already be
 		// committed, but its parent (which devmapper validates when creating
 		// a view) can still be an active snapshot. The View base must have a
 		// committed parent, so we walk *from the container snapshot's parent*
 		// upwards until we find a committed snapshot and use that as the base.
-		info, serr := ss.Stat(ctx, snapshotKey)
+		infoResp, serr := client.snapshots.Stat(withNamespace(ctx, ns), &snapshotsapi.StatSnapshotRequest{
+			Snapshotter: snapshotter,
+			Key:         snapshotKey,
+		})
 		if serr != nil {
-			return "", "", fmt.Errorf("stat snapshot %s (devmapper): %w", snapshotKey, serr)
+			return "", "", fmt.Errorf("stat snapshot %s (devmapper): %w", snapshotKey, grpcErr(serr))
 		}
-		current := info.Parent
+		current := infoResp.GetInfo().GetParent()
 		if current == "" {
 			// No parent chain to walk; fall back to the original key.
 			log.WithFields(logrus.Fields{
@@ -213,20 +289,27 @@ func resolveSnapshotKey(ctx context.Context, client *containerd.Client, containe
 		}
 
 		for {
-			pinfo, serr := ss.Stat(ctx, current)
+			pinfoResp, serr := client.snapshots.Stat(withNamespace(ctx, ns), &snapshotsapi.StatSnapshotRequest{
+				Snapshotter: snapshotter,
+				Key:         current,
+			})
 			if serr != nil {
-				return "", "", fmt.Errorf("stat snapshot %s (devmapper parent walk): %w", current, serr)
+				return "", "", fmt.Errorf("stat snapshot %s (devmapper parent walk): %w", current, grpcErr(serr))
+			}
+			pinfo := pinfoResp.GetInfo()
+			if pinfo == nil {
+				return "", "", fmt.Errorf("stat snapshot %s (devmapper parent walk): empty info", current)
 			}
 
 			log.WithFields(logrus.Fields{
 				"container":          containerID,
 				"candidate_base":     current,
-				"kind":               pinfo.Kind,
-				"parent":             pinfo.Parent,
+				"kind":               pinfo.GetKind(),
+				"parent":             pinfo.GetParent(),
 				"container_snapshot": snapshotKey,
 			}).Info("inspected devmapper snapshot while resolving shared view base")
 
-			if pinfo.Kind == snapshots.KindCommitted {
+			if pinfo.GetKind() == snapshotsapi.Kind_COMMITTED {
 				log.WithFields(logrus.Fields{
 					"container":          containerID,
 					"container_snapshot": snapshotKey,
@@ -236,10 +319,10 @@ func resolveSnapshotKey(ctx context.Context, client *containerd.Client, containe
 				break
 			}
 
-			if pinfo.Parent == "" {
+			if pinfo.GetParent() == "" {
 				return "", "", fmt.Errorf("devmapper snapshot %s has no committed parent in chain", snapshotKey)
 			}
-			current = pinfo.Parent
+			current = pinfo.GetParent()
 		}
 	}
 
@@ -312,18 +395,36 @@ func waitForSharedViewReady(paths sharedViewPaths) error {
 
 // getOrCreateSharedViewMounts returns the OS mount list for viewKey,
 // creating the snapshot view in containerd when it does not already exist.
-func getOrCreateSharedViewMounts(ctx context.Context, client *containerd.Client, snapshotter, viewKey, snapshotKey string) ([]mount.Mount, error) {
-	ss := client.SnapshotService(snapshotter)
+func toMounts(mm []*types.Mount) []mount.Mount {
+	mounts := make([]mount.Mount, len(mm))
+	for i, m := range mm {
+		mounts[i] = mount.Mount{
+			Type:    m.Type,
+			Source:  m.Source,
+			Target:  m.Target,
+			Options: m.Options,
+		}
+	}
+	return mounts
+}
+
+func getOrCreateSharedViewMounts(ctx context.Context, client *containerdClients, ns, snapshotter, viewKey, snapshotKey string) ([]mount.Mount, error) {
 	start := time.Now()
-	mounts, err := ss.View(ctx, viewKey, snapshotKey)
+	viewResp, err := client.snapshots.View(withNamespace(ctx, ns), &snapshotsapi.ViewSnapshotRequest{
+		Snapshotter: snapshotter,
+		Key:         viewKey,
+		Parent:      snapshotKey,
+	})
+	err = grpcErr(err)
 	if err == nil {
+		mounts := toMounts(viewResp.GetMounts())
 		log.WithFields(logrus.Fields{
 			"op":          "SnapshotService.View",
 			"snapshotter": snapshotter,
 			"view_key":    viewKey,
 			"snapshot":    snapshotKey,
 			"duration_ms": time.Since(start).Milliseconds(),
-		}).Info("containerd call completed")
+		}).Debug("containerd call completed")
 		logPhaseDuration("shiminject.shared_view.snapshot_view", time.Since(start), logrus.Fields{
 			"snapshotter": snapshotter,
 			"view_key":    viewKey,
@@ -342,7 +443,11 @@ func getOrCreateSharedViewMounts(ctx context.Context, client *containerd.Client,
 		return nil, fmt.Errorf("failed to create shared view snapshot %s from %s: %w", viewKey, snapshotKey, err)
 	}
 	// View already exists — fetch its mounts.
-	mounts, err = ss.Mounts(ctx, viewKey)
+	mountsResp, err := client.snapshots.Mounts(withNamespace(ctx, ns), &snapshotsapi.MountsRequest{
+		Snapshotter: snapshotter,
+		Key:         viewKey,
+	})
+	err = grpcErr(err)
 	if err != nil {
 		logPhaseDuration("shiminject.shared_view.snapshot_mounts", time.Since(start), logrus.Fields{
 			"snapshotter": snapshotter,
@@ -356,7 +461,8 @@ func getOrCreateSharedViewMounts(ctx context.Context, client *containerd.Client,
 		"snapshotter": snapshotter,
 		"snapshot":    viewKey,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("containerd call completed")
+	}).Debug("containerd call completed")
+	mounts := toMounts(mountsResp.GetMounts())
 	logPhaseDuration("shiminject.shared_view.snapshot_mounts", time.Since(start), logrus.Fields{
 		"snapshotter": snapshotter,
 		"view_key":    viewKey,
@@ -386,7 +492,7 @@ func buildMountErrorFields(dataDir string, mounts []mount.Mount) logrus.Fields {
 // If it is already mounted the function is a no-op.
 // createdData indicates whether the caller freshly created the directory;
 // on mount failure it is used to decide whether to clean up.
-func mountSharedView(ctx context.Context, client *containerd.Client, snapshotter, viewKey, snapshotKey string, paths sharedViewPaths, createdData bool) error {
+func mountSharedView(ctx context.Context, client *containerdClients, ns, snapshotter, viewKey, snapshotKey string, paths sharedViewPaths, createdData bool) error {
 	timer := startPhaseTimer("shiminject.shared_view.mount.total", logrus.Fields{
 		"snapshotter": snapshotter,
 		"view_key":    viewKey,
@@ -403,7 +509,7 @@ func mountSharedView(ctx context.Context, client *containerd.Client, snapshotter
 		log.WithFields(logrus.Fields{
 			"mount_path": paths.dataDir,
 			"view_key":   viewKey,
-		}).Info("shared snapshot view already mounted, reusing")
+		}).Debug("shared snapshot view already mounted, reusing")
 		logPhaseDuration("shiminject.shared_view.mount.reuse", 0, logrus.Fields{
 			"mount_path": paths.dataDir,
 			"view_key":   viewKey,
@@ -411,7 +517,7 @@ func mountSharedView(ctx context.Context, client *containerd.Client, snapshotter
 		return nil
 	}
 
-	mounts, err := getOrCreateSharedViewMounts(ctx, client, snapshotter, viewKey, snapshotKey)
+	mounts, err := getOrCreateSharedViewMounts(ctx, client, ns, snapshotter, viewKey, snapshotKey)
 	if err != nil {
 		retErr = err
 		return err
@@ -461,7 +567,7 @@ func mountSharedView(ctx context.Context, client *containerd.Client, snapshotter
 		"mount_path":  paths.dataDir,
 		"view_key":    viewKey,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("shared snapshot view mounted")
+	}).Debug("shared snapshot view mounted")
 	logPhaseDuration("shiminject.shared_view.mount.perform", time.Since(start), logrus.Fields{
 		"mount_path": paths.dataDir,
 		"view_key":   viewKey,
@@ -496,7 +602,7 @@ func registerContainerUser(containerID string, paths sharedViewPaths, createdDat
 		"op":          "marker.write",
 		"marker":      userMarker,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("shared view user marker written")
+	}).Debug("shared view user marker written")
 	return nil
 }
 
@@ -518,7 +624,7 @@ func injectViewPathToConfig(bundle, containerID, mountPath string) error {
 		"bundle":    bundle,
 		"config":    configPath,
 		"view_path": mountPath,
-	}).Info("preparing to update config.json with snapshot view annotation")
+	}).Debug("preparing to update config.json with snapshot view annotation")
 
 	start := time.Now()
 	data, err := os.ReadFile(configPath)
@@ -531,19 +637,44 @@ func injectViewPathToConfig(bundle, containerID, mountPath string) error {
 		"config":      configPath,
 		"duration_ms": time.Since(start).Milliseconds(),
 		"bytes":       len(data),
-	}).Info("read config.json")
+	}).Debug("read config.json")
 
-	var spec specs.Spec
-	if err := json.Unmarshal(data, &spec); err != nil {
+	// Memory-lean path: patch only top-level "annotations" instead of
+	// unmarshalling the full OCI spec struct.
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
 		retErr = err
 		return fmt.Errorf("unmarshal config: %w", err)
 	}
-	if spec.Annotations == nil {
-		spec.Annotations = make(map[string]string)
-	}
-	spec.Annotations[annotViewMntPath] = mountPath
 
-	out, err := json.MarshalIndent(&spec, "", "  ")
+	annotations := make(map[string]string)
+	if raw, ok := root["annotations"]; ok && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &annotations); err != nil {
+			retErr = err
+			return fmt.Errorf("unmarshal config.annotations: %w", err)
+		}
+	}
+	// Fast path: avoid rewrite/allocation churn when value is already set.
+	if annotations[annotViewMntPath] == mountPath {
+		log.WithFields(logrus.Fields{
+			"op":        "config.json.skip_update",
+			"bundle":    bundle,
+			"container": containerID,
+			"view_path": mountPath,
+		}).Debug("snapshot view mount path already present in config.json")
+		return nil
+	}
+	annotations[annotViewMntPath] = mountPath
+
+	annBytes, err := json.Marshal(annotations)
+	if err != nil {
+		retErr = err
+		return fmt.Errorf("marshal config.annotations: %w", err)
+	}
+	root["annotations"] = annBytes
+
+	// Use compact marshal to reduce transient allocation pressure in shim hot path.
+	out, err := json.Marshal(root)
 	if err != nil {
 		retErr = err
 		return fmt.Errorf("marshal config with view mount annotation: %w", err)
@@ -559,7 +690,7 @@ func injectViewPathToConfig(bundle, containerID, mountPath string) error {
 		"container":   containerID,
 		"duration_ms": time.Since(start).Milliseconds(),
 		"view_path":   mountPath,
-	}).Info("injected snapshot view mount path into config.json")
+	}).Debug("injected snapshot view mount path into config.json")
 	return nil
 }
 
@@ -587,6 +718,16 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		return nil, fmt.Errorf("namespace required: %w", err)
 	}
 
+	// Experiment mode: skip before creating containerd client to isolate
+	// client-related memory overhead in shim.
+	if disableSharedSnapshotViewCreate {
+		log.WithFields(logrus.Fields{
+			"container": containerID,
+			"ns":        ns,
+		}).Info("shared snapshot view creation disabled by experiment toggle (no containerd client)")
+		return nil, nil
+	}
+
 	client, err := newContainerdClient(ns)
 	if err != nil {
 		retErr = err
@@ -599,7 +740,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	// snapshotter: the snapshotter backend type (e.g. overlayfs, devmapper);
 	//              determines which snapshotter service to operate on and drives
 	//              the devmapper-specific parent resolution path.
-	snapshotKey, snapshotter, err := resolveSnapshotKey(ctx, client, containerID)
+	snapshotKey, snapshotter, err := resolveSnapshotKey(ctx, client, ns, containerID)
 	if err != nil {
 		retErr = err
 		return nil, err
@@ -618,8 +759,9 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	// Ensure a containerd lease exists for this shared view so that GC keeps
 	// the underlying snapshot device alive while any container is using it.
 	leaseID := sharedViewLeaseID + sharedViewID
-	ls := client.LeasesService()
-	if _, err := ls.Create(ctx, leases.WithID(leaseID)); err != nil && !errdefs.IsAlreadyExists(err) {
+	_, err = client.leases.Create(withNamespace(ctx, ns), &leasesapi.CreateRequest{ID: leaseID})
+	err = grpcErr(err)
+	if err != nil && !errdefs.IsAlreadyExists(err) {
 		retErr = err
 		return nil, fmt.Errorf("create shared view lease %s: %w", leaseID, err)
 	}
@@ -628,7 +770,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		"container":   containerID,
 		"snapshotter": snapshotter,
 	}, nil)
-	ctx = leases.WithLease(ctx, leaseID)
+	ctx = metadata.AppendToOutgoingContext(withNamespace(ctx, ns), "containerd-lease", leaseID)
 
 	// Ensure root directory exists before acquiring the lock file inside it.
 	if err := os.MkdirAll(sharedViewsRoot, 0755); err != nil {
@@ -686,7 +828,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 				shouldCreate = true
 				unlock()
 
-				if err := mountSharedView(ctx, client, snapshotter, viewKey, snapshotKey, paths, createdData); err != nil {
+				if err := mountSharedView(ctx, client, ns, snapshotter, viewKey, snapshotKey, paths, createdData); err != nil {
 					_, relock, lerr := acquireSharedViewLock(paths.lockPath)
 					if lerr == nil {
 						if cerr := clearSharedViewCreating(paths); cerr != nil {
@@ -713,7 +855,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 			shouldCreate = true
 			unlock()
 
-			if err := mountSharedView(ctx, client, snapshotter, viewKey, snapshotKey, paths, createdData); err != nil {
+			if err := mountSharedView(ctx, client, ns, snapshotter, viewKey, snapshotKey, paths, createdData); err != nil {
 				_, relock, lerr := acquireSharedViewLock(paths.lockPath)
 				if lerr == nil {
 					if cerr := clearSharedViewCreating(paths); cerr != nil {
@@ -763,8 +905,7 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 		"snapshotter":    snapshotter,
 		"namespace":      ns,
 		"created_mount":  createdData,
-	}).Info("shared snapshot view ready; container will bind-mount files from it")
-
+	}).Debug("shared snapshot view ready; container will bind-mount files from it")
 	if err := injectViewPathToConfig(bundle, containerID, paths.dataDir); err != nil {
 		retErr = err
 		return nil, err
@@ -907,7 +1048,7 @@ func removeSharedViewSnapshot(ctx context.Context, info *SnapshotViewInfo) {
 	// Attach the shared view lease to the context so snapshot removal is
 	// performed within the same lease that protects the snapshot from GC.
 	if info.SharedViewID != "" {
-		ctx = leases.WithLease(ctx, sharedViewLeaseID+info.SharedViewID)
+		ctx = metadata.AppendToOutgoingContext(ctx, "containerd-lease", sharedViewLeaseID+info.SharedViewID)
 	}
 
 	client, err := newContainerdClient(info.Namespace)
@@ -920,8 +1061,12 @@ func removeSharedViewSnapshot(ctx context.Context, info *SnapshotViewInfo) {
 	}
 	defer client.Close()
 
-	ss := client.SnapshotService(info.Snapshotter)
-	if err := ss.Remove(ctx, info.ViewKey); err != nil {
+	_, err = client.snapshots.Remove(withNamespace(ctx, info.Namespace), &snapshotsapi.RemoveSnapshotRequest{
+		Snapshotter: info.Snapshotter,
+		Key:         info.ViewKey,
+	})
+	err = grpcErr(err)
+	if err != nil {
 		log.WithError(err).WithFields(logrus.Fields{
 			"view_key":    info.ViewKey,
 			"snapshotter": info.Snapshotter,
@@ -937,8 +1082,9 @@ func removeSharedViewSnapshot(ctx context.Context, info *SnapshotViewInfo) {
 		// metadata while ensuring the snapshot was protected during use.
 		if info.SharedViewID != "" {
 			leaseID := sharedViewLeaseID + info.SharedViewID
-			ls := client.LeasesService()
-			if err := ls.Delete(ctx, leases.Lease{ID: leaseID}); err != nil && !errdefs.IsNotFound(err) {
+			_, err := client.leases.Delete(withNamespace(ctx, info.Namespace), &leasesapi.DeleteRequest{ID: leaseID})
+			err = grpcErr(err)
+			if err != nil && !errdefs.IsNotFound(err) {
 				log.WithError(err).WithField("lease_id", leaseID).Warn("failed to remove shared view lease from containerd")
 			} else if err == nil {
 				log.WithField("lease_id", leaseID).Info("removed shared view lease from containerd")

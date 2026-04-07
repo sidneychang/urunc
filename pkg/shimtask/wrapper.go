@@ -44,7 +44,7 @@ func (w *wrapper) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		"op":          "CreateSnapshotView",
 		"id":          r.ID,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("shim step completed")
+	}).Debug("shim step completed")
 	if err != nil {
 		log.WithError(err).WithField("id", r.ID).Warn("create snapshot view failed, continuing without")
 	} else {
@@ -57,7 +57,7 @@ func (w *wrapper) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		"op":          "inner.Create",
 		"id":          r.ID,
 		"duration_ms": time.Since(start).Milliseconds(),
-	}).Info("shim step completed")
+	}).Debug("shim step completed")
 	if err != nil && w.viewInfo != nil {
 		// Best-effort cleanup if inner Create fails
 		if cerr := shiminject.CleanupSnapshotView(ctx, w.viewInfo); cerr != nil {

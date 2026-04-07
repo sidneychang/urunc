@@ -104,26 +104,34 @@ task_ids="$(list_tasks)"
 shim_ids="$(list_shims)"
 
 if [ -n "$container_ids" ]; then
+  echo "[reset] removing runtime containers"
   for id in $container_ids; do
+    echo "[reset] remove container $id"
     remove_container "$id"
   done
 fi
 
 if [ -n "$task_ids" ]; then
+  echo "[reset] removing remaining tasks"
   for id in $task_ids; do
+    echo "[reset] remove task $id"
     sudo ctr -n "$NS" tasks kill -s SIGKILL "$id" >/dev/null 2>&1 || true
     sudo ctr -n "$NS" tasks delete -f "$id" >/dev/null 2>&1 || true
   done
 fi
 
 if [ -n "$shim_ids" ]; then
+  echo "[reset] killing shims"
   descendants="$(descendants_of $shim_ids)"
   if [ -n "$descendants" ]; then
+    echo "[reset] kill shim descendants $descendants"
     sudo kill -9 $descendants >/dev/null 2>&1 || true
   fi
+  echo "[reset] kill shims $shim_ids"
   sudo kill -9 $shim_ids >/dev/null 2>&1 || true
 fi
 
+echo "[reset] removing snapshots"
 remove_snapshots
 
 remaining_containers="$(sudo ctr -n "$NS" c ls 2>/dev/null | awk 'NR>1 {print $1}')"
