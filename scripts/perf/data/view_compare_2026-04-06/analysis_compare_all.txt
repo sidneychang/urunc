@@ -1,0 +1,36 @@
+no_view vs with_view — 综合分析（顺序压测，峰值行 + cleanup）
+no_view: sequential_all_no_view_merged.tsv
+with_view: sequential_all_with_view_merged.tsv
+
+=== devmapper ===
+  N=10  Δmem_avail +0.156 GiB  ΔRSS合计 +91.7 MiB  Δrun_cd +0.1 MiB  Δsnap_root +0.000 GiB
+  N=20  Δmem_avail +0.175 GiB  ΔRSS合计 +170.0 MiB  Δrun_cd +0.3 MiB  Δsnap_root +0.000 GiB
+  N=30  Δmem_avail +0.112 GiB  ΔRSS合计 +228.1 MiB  Δrun_cd +0.4 MiB  Δsnap_root +0.000 GiB
+  N=40  Δmem_avail +0.057 GiB  ΔRSS合计 +310.6 MiB  Δrun_cd +0.5 MiB  Δsnap_root +0.000 GiB
+  N=50  Δmem_avail +0.135 GiB  ΔRSS合计 +427.1 MiB  Δrun_cd +0.7 MiB  Δsnap_root +0.000 GiB
+  cleanup 耗时差 (with − no):
+    N=10: -0.02 s
+    N=20: +0.62 s
+    N=30: +0.98 s
+    N=40: +0.56 s
+    N=50: +1.68 s
+
+=== blockfile ===
+  N=10  Δmem_avail -0.152 GiB  ΔRSS合计 +102.6 MiB  Δrun_cd +0.1 MiB  Δsnap_root +0.000 GiB
+  N=20  Δmem_avail -0.046 GiB  ΔRSS合计 +172.0 MiB  Δrun_cd +0.3 MiB  Δsnap_root +0.000 GiB
+  N=30  Δmem_avail +0.058 GiB  ΔRSS合计 +250.6 MiB  Δrun_cd +0.4 MiB  Δsnap_root +0.000 GiB
+  N=40  Δmem_avail -0.006 GiB  ΔRSS合计 +324.1 MiB  Δrun_cd +0.5 MiB  Δsnap_root +0.000 GiB
+  N=50  Δmem_avail +0.031 GiB  ΔRSS合计 +400.9 MiB  Δrun_cd +0.7 MiB  Δsnap_root +0.000 GiB
+  cleanup 耗时差 (with − no):
+    N=10: +0.14 s
+    N=20: +0.45 s
+    N=30: +0.75 s
+    N=40: +1.04 s
+    N=50: +1.31 s
+
+要点（请结合 compare_*.png 阅读）:
+- mem_avail / RSS：view 路径主要减少拷贝、改用 bind；若峰值差异很小，说明瓶颈仍在 qemu/VMM 与容器数量。
+- blockfile 的 snapshotter_root：view 可能略增或减少，取决于共享 view 快照与 du 可见文件。
+- devmapper thin 列：小幅差异常见，与 thin 分配/统计粒度有关。
+- /run/containerd：若 with_view 明显更低，可能反映 monRootfs 侧拷贝减少。
+- cleanup：with_view 需卸载 shared view，可能略增或略减删除耗时。

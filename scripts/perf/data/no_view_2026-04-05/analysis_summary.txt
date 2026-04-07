@@ -1,0 +1,34 @@
+no_view 顺序压测 — 峰值行（after_start_N_of_N）摘要
+数据源: sequential_all_no_view_merged.tsv
+
+=== devmapper ===
+  N=10  估算已用内存≈13.74 GiB  (RSS 合计 containerd+shim+qemu ≈ 1084 MiB)  snapshotter_root≈0.001 GiB  /run/containerd du≈120 MiB  thin_data≈2.2 MiB  thin_data_pct=0.1745
+  N=20  估算已用内存≈15.15 GiB  (RSS 合计 containerd+shim+qemu ≈ 2169 MiB)  snapshotter_root≈0.001 GiB  /run/containerd du≈240 MiB  thin_data≈2.3 MiB  thin_data_pct=0.1794
+  N=30  估算已用内存≈16.10 GiB  (RSS 合计 containerd+shim+qemu ≈ 3217 MiB)  snapshotter_root≈0.001 GiB  /run/containerd du≈360 MiB  thin_data≈2.4 MiB  thin_data_pct=0.1841
+  N=40  估算已用内存≈17.22 GiB  (RSS 合计 containerd+shim+qemu ≈ 4278 MiB)  snapshotter_root≈0.001 GiB  /run/containerd du≈480 MiB  thin_data≈2.4 MiB  thin_data_pct=0.1887
+  N=50  估算已用内存≈18.39 GiB  (RSS 合计 containerd+shim+qemu ≈ 5351 MiB)  snapshotter_root≈0.001 GiB  /run/containerd du≈601 MiB  thin_data≈2.5 MiB  thin_data_pct=0.1933
+
+=== blockfile ===
+  N=10  估算已用内存≈13.57 GiB  (RSS 合计 containerd+shim+qemu ≈ 1089 MiB)  snapshotter_root≈14.160 GiB  /run/containerd du≈120 MiB
+  N=20  估算已用内存≈14.71 GiB  (RSS 合计 containerd+shim+qemu ≈ 2160 MiB)  snapshotter_root≈19.043 GiB  /run/containerd du≈240 MiB
+  N=30  估算已用内存≈15.93 GiB  (RSS 合计 containerd+shim+qemu ≈ 3229 MiB)  snapshotter_root≈23.926 GiB  /run/containerd du≈360 MiB
+  N=40  估算已用内存≈16.86 GiB  (RSS 合计 containerd+shim+qemu ≈ 4297 MiB)  snapshotter_root≈28.809 GiB  /run/containerd du≈480 MiB
+  N=50  估算已用内存≈18.04 GiB  (RSS 合计 containerd+shim+qemu ≈ 5360 MiB)  snapshotter_root≈33.692 GiB  /run/containerd du≈601 MiB
+
+对比观察（峰值）:
+- 可用内存随 N 下降：blockfile 与 devmapper 趋势相近，N=50 时 blockfile 可用内存略低若干 GB（见曲线图）。
+- devmapper：snapshotter 插件目录 du（snapshotter_root）几乎不变；真实数据在 thin pool（thin_data_used / 百分比随 N 升）。
+- blockfile：snapshotter_root 随 N 近似线性增长（每容器一块稀疏文件等），与 README 描述一致。
+- /run/containerd（run_containerd_bytes）在两种后端下随 N 同步增长，反映 bundle/monRootfs 等运行时文件。
+
+cleanup 后（after_cleanup_sequential_N）batch_elapsed_sec 为整批删容器耗时；blockfile 随 N 明显变长。
+  blockfile N=10: cleanup 32.7s, snapshotter_root≈11.23 GiB
+  blockfile N=20: cleanup 66.0s, snapshotter_root≈11.23 GiB
+  blockfile N=30: cleanup 101.3s, snapshotter_root≈11.72 GiB
+  blockfile N=40: cleanup 136.5s, snapshotter_root≈11.23 GiB
+  blockfile N=50: cleanup 172.6s, snapshotter_root≈11.23 GiB
+  devmapper N=10: cleanup 11.9s, snapshotter_root≈0.00 GiB
+  devmapper N=20: cleanup 24.6s, snapshotter_root≈0.00 GiB
+  devmapper N=30: cleanup 38.4s, snapshotter_root≈0.00 GiB
+  devmapper N=40: cleanup 53.9s, snapshotter_root≈0.00 GiB
+  devmapper N=50: cleanup 69.2s, snapshotter_root≈0.00 GiB
