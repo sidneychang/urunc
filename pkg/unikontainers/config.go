@@ -36,15 +36,22 @@ var ErrEmptyAnnotations = errors.New("spec annotations are empty")
 // Urunc specific annotations
 // ALways keep it in sync with the struct UnikernelConfig struct
 const (
-	annotType          = "com.urunc.unikernel.unikernelType"
-	annotVersion       = "com.urunc.unikernel.unikernelVersion"
-	annotBinary        = "com.urunc.unikernel.binary"
-	annotCmdLine       = "com.urunc.unikernel.cmdline"
-	annotHypervisor    = "com.urunc.unikernel.hypervisor"
-	annotInitrd        = "com.urunc.unikernel.initrd"
-	annotBlock         = "com.urunc.unikernel.block"
-	annotBlockMntPoint = "com.urunc.unikernel.blkMntPoint"
-	annotMountRootfs   = "com.urunc.unikernel.mountRootfs"
+	annotType                  = "com.urunc.unikernel.unikernelType"
+	annotVersion               = "com.urunc.unikernel.unikernelVersion"
+	annotBinary                = "com.urunc.unikernel.binary"
+	annotCmdLine               = "com.urunc.unikernel.cmdline"
+	annotHypervisor            = "com.urunc.unikernel.hypervisor"
+	annotInitrd                = "com.urunc.unikernel.initrd"
+	annotBlock                 = "com.urunc.unikernel.block"
+	annotBlockMntPoint         = "com.urunc.unikernel.blkMntPoint"
+	annotMountRootfs           = "com.urunc.unikernel.mountRootfs"
+	annotSnapshotViewMountPath = "com.urunc.snapshot.view.mount_path" // Internal (shim -> urunc): mounted RO view path
+)
+
+const (
+	defaultContainerdAddress   = "/run/containerd/containerd.sock"
+	defaultContainerdNamespace = "k8s.io"
+	// snapshotter will be auto-detected from rootfs mount info (devmapper/blockfile)
 )
 
 // A UnikernelConfig struct holds the info provided by bima image on how to execute our unikernel

@@ -62,10 +62,23 @@ type SharedfsParams struct {
 }
 
 type RootfsParams struct {
-	Type        string // The type of rootfs (block, initrd, 9pfs, virtiofs)
-	Path        string // The path in the host where rootfs resides
-	MountedPath string // The mountpoint in the host where the rootfs is mounted
-	MonRootfs   string // The rootfs for the monitor process
+	Type             string // The type of rootfs (block, initrd, 9pfs, virtiofs)
+	Path             string // The path in the host where rootfs resides
+	MountedPath      string // The mountpoint in the host where the rootfs is mounted
+	MonRootfs        string // The rootfs for the monitor process
+	Readonly         bool   // True if the rootfs is read-only
+	FromSnapshotView bool   // True if this rootfs comes from a containerd snapshot view
+	SnapshotView     *SnapshotViewResult // The snapshot view result if FromSnapshotView is true
+}
+
+// SnapshotViewResult holds the result of creating a snapshot view
+// This is defined here to avoid circular imports
+type SnapshotViewResult struct {
+	ViewKey     string // The snapshot view key in containerd
+	MountPath   string // Where the view is mounted
+	BlockDevice string // The underlying block device path
+	Snapshotter string // The snapshotter name used
+	Namespace   string // The containerd namespace
 }
 
 // Specific to Linux
