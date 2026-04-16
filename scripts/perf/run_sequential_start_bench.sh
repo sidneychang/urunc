@@ -15,10 +15,60 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_bench_common.sh"
 
 NAME_PREFIX="${NAME_PREFIX:-urunc-seqbench}"
 SCRIPT_TAG="seqbench-$$"
+NERDCTL_RUN_TIMEOUT_SEC="${NERDCTL_RUN_TIMEOUT_SEC:-180}"
+NERDCTL_PULL_TIMEOUT_SEC="${NERDCTL_PULL_TIMEOUT_SEC:-180}"
+BENCH_DEBUG="${BENCH_DEBUG:-1}"
+BENCH_DEBUG_LOG="${BENCH_DEBUG_LOG:-/tmp/urunc-seqbench-debug.log}"
 
 log() { printf '%s\n' "$*"; }
 
+debug_log() {
+  [[ "${BENCH_DEBUG:-0}" == "1" ]] || return 0
+  local ts
+  ts="$(date -Iseconds)"
+  printf '[%s] %s\n' "$ts" "$*" | tee -a "$BENCH_DEBUG_LOG" >/dev/null
+}
+
+debug_dump_runtime_state() {
+  [[ "${BENCH_DEBUG:-0}" == "1" ]] || return 0
+  {
+    echo "----- runtime state -----"
+    echo "ns=$NS snapshotter=$SNAPSHOTTER runtime=$RUNTIME"
+    echo "running_containers=$(bench_sudo nerdctl -n "$NS" ps -q 2>/dev/null | wc -l | tr -d ' ')"
+    echo "all_containers=$(bench_sudo nerdctl -n "$NS" ps -a -q 2>/dev/null | wc -l | tr -d ' ')"
+    echo "tasks:"
+    bench_sudo ctr -n "$NS" tasks ls 2>/dev/null | sed 's/^/  /' || true
+    echo "recent_shims:"
+    ps -eo pid=,args= 2>/dev/null | awk '$0 ~ /containerd-shim-urunc-v2/ {print "  "$0}' | tail -n 5 || true
+    echo "-------------------------"
+  } >>"$BENCH_DEBUG_LOG"
+}
+
+run_nerdctl_detached_with_timeout() {
+  # Echo container ID on success; returns non-zero on failure/timeout.
+  local name="$1"
+  local timeout_sec="${2:-0}"
+  local rc=0 out=""
+  _bench_fill_sudo_env_cmd
+  local cmd=(
+    sudo "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" run -d
+    --name "$name"
+    --runtime "$RUNTIME"
+    "$IMAGE"
+  )
+  if [[ "$timeout_sec" =~ ^[0-9]+$ ]] && [[ "$timeout_sec" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+    out="$(timeout "${timeout_sec}" "${cmd[@]}" 2>/dev/null | tail -1)" || rc=$?
+  else
+    out="$("${cmd[@]}" 2>/dev/null | tail -1)" || rc=$?
+  fi
+  if [[ $rc -ne 0 || -z "$out" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
 ensure_image() {
+  debug_log "ensure_image: start force_pull=${FORCE_PULL} image=${IMAGE}"
   local need_pull=0
   if [[ "${FORCE_PULL}" == "1" ]]; then
     need_pull=1
@@ -26,15 +76,34 @@ ensure_image() {
     need_pull=1
   fi
   if [[ "${need_pull}" == "1" ]]; then
-    bench_sudo nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || exit $?
+    debug_log "ensure_image: pulling image"
+    local rc=0
+    if [[ "$NERDCTL_PULL_TIMEOUT_SEC" =~ ^[0-9]+$ ]] && [[ "$NERDCTL_PULL_TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+      _bench_fill_sudo_env_cmd
+      timeout "$NERDCTL_PULL_TIMEOUT_SEC" sudo "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
+    else
+      bench_sudo nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
+    fi
+    if [[ $rc -ne 0 ]]; then
+      log "[error] image pull failed/timeout rc=$rc ns=$NS image=$IMAGE"
+      debug_log "ensure_image: pull failed rc=$rc timeout_sec=${NERDCTL_PULL_TIMEOUT_SEC}"
+      debug_dump_runtime_state
+      exit "$rc"
+    fi
+    debug_log "ensure_image: pull done"
+  else
+    debug_log "ensure_image: image already present"
   fi
 }
 
 run_reset() {
   if [[ "${SKIP_RESET:-0}" == "1" ]]; then
+    debug_log "run_reset: skipped"
     return 0
   fi
+  debug_log "run_reset: invoking reset script"
   NS="$NS" SNAPSHOTTER="$SNAPSHOTTER" "$RESET_SCRIPT"
+  debug_log "run_reset: completed"
 }
 
 cleanup_ids_file() {
@@ -97,6 +166,7 @@ main() {
   log "== 顺序启动基准 =="
   log "NS=$NS IMAGE=$IMAGE SNAPSHOTTER=$SNAPSHOTTER RUNTIME=$RUNTIME"
   log "SEQUENTIAL_TOTAL=$SEQUENTIAL_TOTAL SAMPLE_EVERY=$SAMPLE_EVERY NAME_PREFIX=$NAME_PREFIX"
+  debug_log "bench_start: total=${SEQUENTIAL_TOTAL} sample_every=${SAMPLE_EVERY} timeout_sec=${NERDCTL_RUN_TIMEOUT_SEC}"
 
   bench_apply_devmapper_base_image_size
 
@@ -123,6 +193,7 @@ main() {
 
   run_reset
   ensure_image
+  debug_log "main_loop: start creating containers"
 
   local ALL_CIDS
   ALL_CIDS="$(mktemp "${TMPDIR:-/tmp}/${SCRIPT_TAG}-cids.XXXXXX")"
@@ -135,17 +206,17 @@ main() {
     name="${NAME_PREFIX}-${SCRIPT_TAG}-${i}"
     t0=$(date +%s.%N)
     rc=0
-    cid="$(bench_sudo nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" run -d \
-      --name "$name" \
-      --runtime "$RUNTIME" \
-      "$IMAGE" 2>/dev/null | tail -1)" || rc=$?
+    cid="$(run_nerdctl_detached_with_timeout "$name" "$NERDCTL_RUN_TIMEOUT_SEC")" || rc=$?
     t1=$(date +%s.%N)
     elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.6f", b - a }')
     if [[ $rc -ne 0 || -z "$cid" ]]; then
       log "[error] run $i failed rc=$rc cid=${cid:-empty}"
+      debug_log "run_failed: idx=${i} name=${name} rc=${rc} elapsed=${elapsed}"
+      debug_dump_runtime_state
       exit 1
     fi
     log "[start] container $i/${SEQUENTIAL_TOTAL} nerdctl_run_sec=${elapsed}"
+    debug_log "run_ok: idx=${i} cid=${cid} elapsed=${elapsed}"
     printf '%s\n' "$cid" >>"$ALL_CIDS"
 
     if [[ "${RESOURCE_SAMPLE:-0}" == "1" ]]; then
@@ -167,9 +238,16 @@ main() {
   seq_t1=$(date +%s.%N)
   BENCH_BATCH_ELAPSED_SEC=$(awk -v a="$seq_t0" -v b="$seq_t1" 'BEGIN { printf "%.6f", b - a }')
   export BENCH_BATCH_ELAPSED_SEC
+  debug_log "main_loop: all containers started batch_elapsed=${BENCH_BATCH_ELAPSED_SEC}"
+
+  # Optional: wait and sample stable points while containers are still running.
+  if [[ "${RESOURCE_SAMPLE:-0}" == "1" ]] && [[ "${RESOURCE_FORMAT:-v2}" != "legacy" ]]; then
+    bench_resource_v2_emit_start_settle "after_start_${SEQUENTIAL_TOTAL}_of_${SEQUENTIAL_TOTAL}" "$NS" "$SNAPSHOTTER"
+  fi
 
   log "======== 删除 $SEQUENTIAL_TOTAL 个容器 ========"
   cleanup_ids_file "$ALL_CIDS"
+  debug_log "cleanup: removed created containers"
   rm -f "$ALL_CIDS"
   trap - EXIT
 

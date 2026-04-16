@@ -143,20 +143,29 @@ bench_resolve_devmapper_thin_lv() {
   return 1
 }
 
-# Parse dmsetup status: "0 <len> thin-pool <tid> <data_u>/<data_t> <meta_u>/<meta_t> ..."
-# Sectors default 512 bytes (override BENCH_DM_SECTOR_BYTES).
-_bench_dmsetup_thin_pool_sectors() {
+# Parse dmsetup status for dm-thin pool.
+# Typical format:
+#   0 <len> thin-pool <tid> <data_u>/<data_t> <meta_u>/<meta_t> ... - <blocksize_sectors>
+# Where data_u/meta_u are in *blocks* and the last field is the data block size in *sectors*.
+# We convert blocks -> bytes using: blocks * blocksize_sectors * sector_bytes.
+_bench_dmsetup_thin_pool_bytes() {
   local dmname="$1"
   local line
   line="$(bench_sudo dmsetup status "$dmname" 2>/dev/null | head -1)"
   [[ -z "$line" ]] && return 1
   echo "$line" | awk -v ss="${BENCH_DM_SECTOR_BYTES:-512}" '
     {
+      bs = $NF
+      if (bs !~ /^[0-9]+$/ || bs <= 0) bs = 1
       for (i = 1; i <= NF; i++) {
-        if ($i == "thin-pool" && i + 2 <= NF) {
+        if ($i == "thin-pool" && i + 3 <= NF) {
           split($(i + 2), a, "/")
           split($(i + 3), b, "/")
-          print (a[1] + 0) * ss, (a[2] + 0) * ss, (b[1] + 0) * ss, (b[2] + 0) * ss
+          du = (a[1] + 0) * bs * ss
+          dt = (a[2] + 0) * bs * ss
+          mu = (b[1] + 0) * bs * ss
+          mt = (b[2] + 0) * bs * ss
+          print du, dt, mu, mt
           exit
         }
       }
@@ -196,7 +205,7 @@ _bench_devmapper_thin_metrics() {
   fi
 
   if [[ "$src" == "none" ]] && [[ -n "$lv" ]] && [[ "$lv" == dm:* ]]; then
-    secs="$(_bench_dmsetup_thin_pool_sectors "${lv#dm:}")"
+    secs="$(_bench_dmsetup_thin_pool_bytes "${lv#dm:}")"
     if [[ -n "$secs" ]]; then
       read -r d_used d_tot m_used m_tot <<<"$secs"
       du_b="$d_used"
@@ -211,7 +220,7 @@ _bench_devmapper_thin_metrics() {
     local pname
     pname="$(read_devmapper_pool_name "${CONTAINERD_CONFIG:-/etc/containerd/config.toml}")"
     if [[ -n "$pname" ]]; then
-      secs="$(_bench_dmsetup_thin_pool_sectors "$pname")"
+      secs="$(_bench_dmsetup_thin_pool_bytes "$pname")"
       if [[ -n "$secs" ]]; then
         read -r d_used d_tot m_used m_tot <<<"$secs"
         du_b="$d_used"
@@ -418,6 +427,19 @@ _bench_meminfo_coarse_kb() {
   ' /proc/meminfo
 }
 
+_bench_meminfo_breakdown_kb() {
+  awk '
+    /^AnonPages:/    { anon=$2 }
+    /^SReclaimable:/ { srec=$2 }
+    /^KernelStack:/  { kstk=$2 }
+    /^PageTables:/   { pt=$2 }
+    /^Shmem:/        { shm=$2 }
+    END {
+      printf "%s\t%s\t%s\t%s\t%s\n", anon+0, srec+0, kstk+0, pt+0, shm+0
+    }
+  ' /proc/meminfo
+}
+
 _bench_containerd_main_rss_kb() {
   local mainpid rss
   mainpid="$(systemctl show containerd.service -p MainPID --value 2>/dev/null || true)"
@@ -432,6 +454,16 @@ _bench_containerd_main_rss_kb() {
   echo "${rss:-0}"
 }
 
+_bench_containerd_main_pid() {
+  local mainpid
+  mainpid="$(systemctl show containerd.service -p MainPID --value 2>/dev/null || true)"
+  if [[ -z "$mainpid" || "$mainpid" == "0" ]]; then
+    mainpid="$(pidof containerd 2>/dev/null | awk '{print $1}')"
+  fi
+  [[ -n "$mainpid" && "$mainpid" != "0" ]] || return 1
+  echo "$mainpid"
+}
+
 _bench_rss_sum_args_match() {
   local pattern="${1:?}"
   ps -eo rss=,args= 2>/dev/null | awk -v re="$pattern" '
@@ -443,11 +475,148 @@ _bench_rss_sum_args_match() {
   '
 }
 
+_bench_pss_kb_pid() {
+  local pid="${1:?}"
+  [[ -r "/proc/${pid}/smaps_rollup" ]] || true
+  bench_sudo awk '/^Pss:/ { print $2 + 0; exit } END { if (NR == 0) print 0 }' "/proc/${pid}/smaps_rollup" 2>/dev/null || echo 0
+}
+
+_bench_pss_sum_args_match() {
+  local pattern="${1:?}"
+  local sum=0 pid pss
+  while read -r pid _; do
+    [[ -n "$pid" ]] || continue
+    pss="$(_bench_pss_kb_pid "$pid")"
+    sum=$((sum + ${pss:-0}))
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v re="$pattern" '$0 ~ re {gsub(/^[[:space:]]+/, "", $1); print $1}')
+  echo "$sum"
+}
+
+_bench_pss_sum_all_kb() {
+  # Sum Pss from /proc/*/smaps_rollup. This is expensive; enable only when needed.
+  local sum=0 pid pss
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    [[ -r "/proc/${pid}/smaps_rollup" ]] || continue
+    pss="$(bench_sudo awk '/^Pss:/ {print $2 + 0; exit}' "/proc/${pid}/smaps_rollup" 2>/dev/null || echo 0)"
+    sum=$((sum + ${pss:-0}))
+  done
+  echo "$sum"
+}
+
+_bench_cg_mode() {
+  # echo: v2 | v1 | none
+  if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
+    echo v2
+  elif [[ -d /sys/fs/cgroup/memory ]] && [[ -f /sys/fs/cgroup/memory/memory.usage_in_bytes ]]; then
+    echo v1
+  else
+    echo none
+  fi
+}
+
+_bench_cg_read_current_bytes() {
+  local cg_rel="${1:?}"
+  local mode
+  mode="$(_bench_cg_mode)"
+  if [[ "$mode" == "v2" ]]; then
+    local p="/sys/fs/cgroup${cg_rel}/memory.current"
+    [[ -r "$p" ]] || { echo ""; return 0; }
+    cat "$p" 2>/dev/null || echo ""
+    return 0
+  fi
+  if [[ "$mode" == "v1" ]]; then
+    local p="/sys/fs/cgroup/memory${cg_rel}/memory.usage_in_bytes"
+    [[ -r "$p" ]] || { echo ""; return 0; }
+    cat "$p" 2>/dev/null || echo ""
+    return 0
+  fi
+  echo ""
+}
+
+_bench_cg_read_stat_value() {
+  local cg_rel="${1:?}" key="${2:?}"
+  local mode
+  mode="$(_bench_cg_mode)"
+  if [[ "$mode" == "v2" ]]; then
+    local p="/sys/fs/cgroup${cg_rel}/memory.stat"
+    [[ -r "$p" ]] || { echo ""; return 0; }
+    awk -v k="$key" '$1==k {print $2; exit}' "$p" 2>/dev/null || echo ""
+    return 0
+  fi
+  if [[ "$mode" == "v1" ]]; then
+    local p="/sys/fs/cgroup/memory${cg_rel}/memory.stat"
+    [[ -r "$p" ]] || { echo ""; return 0; }
+    awk -v k="$key" '$1==k {print $2; exit}' "$p" 2>/dev/null || echo ""
+    return 0
+  fi
+  echo ""
+}
+
+_bench_pid_cg_path_memory_controller() {
+  local pid="${1:?}"
+  local mode
+  mode="$(_bench_cg_mode)"
+  if [[ "$mode" == "v2" ]]; then
+    awk -F: '$1=="0" {print $3; exit}' "/proc/${pid}/cgroup" 2>/dev/null || true
+    return 0
+  fi
+  if [[ "$mode" == "v1" ]]; then
+    # v1 line format: <hier>:<controllers>:<path>
+    awk -F: '$2 ~ /(^|,)memory(,|$)/ {print $3; exit}' "/proc/${pid}/cgroup" 2>/dev/null || true
+    return 0
+  fi
+  echo ""
+}
+
+_bench_systemd_service_cg_path() {
+  local svc="${1:?}"
+  systemctl show "$svc" -p ControlGroup --value 2>/dev/null || true
+}
+
+_bench_cgv2_sum_current_bytes_for_pids() {
+  local sum=0
+  declare -A seen=()
+  local pid cg cur
+  for pid in "$@"; do
+    [[ -n "$pid" ]] || continue
+    cg="$(_bench_pid_cg_path_memory_controller "$pid")"
+    [[ -n "$cg" ]] || continue
+    [[ -n "${seen[$cg]:-}" ]] && continue
+    seen[$cg]=1
+    cur="$(_bench_cg_read_current_bytes "$cg")"
+    [[ -n "$cur" ]] && sum=$((sum + cur))
+  done
+  echo "$sum"
+}
+
+_bench_cgv2_sum_stat_value_for_pids() {
+  local key="${1:?}"
+  shift
+  local sum=0
+  declare -A seen=()
+  local pid cg v
+  for pid in "$@"; do
+    [[ -n "$pid" ]] || continue
+    cg="$(_bench_pid_cg_path_memory_controller "$pid")"
+    [[ -n "$cg" ]] || continue
+    [[ -n "${seen[$cg]:-}" ]] && continue
+    seen[$cg]=1
+    v="$(_bench_cg_read_stat_value "$cg" "$key")"
+    [[ -n "$v" ]] && sum=$((sum + v))
+  done
+  echo "$sum"
+}
+
 bench_resource_print_header_v2() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "timestamp_iso" "tag" "bench_label" "ns" "snapshotter" \
-    "mem_total_kb" "mem_avail_kb" "mem_free_kb" "mem_cached_kb" "mem_slab_kb" "mem_buffers_kb" \
-    "containerd_main_rss_kb" "shim_urunc_rss_sum_kb" "qemu_rss_sum_kb" \
+    "mem_total_kb" "mem_avail_kb" "mem_free_kb" "mem_cached_kb" "mem_slab_kb" "mem_buffers_kb" "mem_shmem_kb" \
+    "mem_anonpages_kb" "mem_sreclaimable_kb" "mem_kernelstack_kb" "mem_pagetables_kb" \
+    "containerd_main_rss_kb" "shim_urunc_rss_sum_kb" "qemu_rss_sum_kb" "containerd_main_pss_kb" "shim_urunc_pss_sum_kb" "qemu_pss_sum_kb" \
+    "cgv2_containerd_current_bytes" "cgv2_shim_current_bytes_sum" "cgv2_qemu_current_bytes_sum" "cgv2_runtime_current_bytes_sum" \
+    "cgv2_runtime_anon_bytes_sum" "cgv2_runtime_file_bytes_sum" "cgv2_runtime_slab_bytes_sum" "cgv2_runtime_shmem_bytes_sum" \
+    "system_pss_all_kb" \
     "snapshotter_root_bytes" "run_containerd_bytes" \
     "thin_pool_id" "thin_data_pct" "thin_meta_pct" "thin_data_used_bytes" "thin_meta_used_bytes" "thin_metrics_source" \
     "snapshot_count" "running_containers" \
@@ -464,19 +633,96 @@ bench_resource_sample_line_v2() {
 
   local mt ma mf c s b
   mt="" && ma="" && mf="" && c="" && s="" && b=""
+  local shmem
+  shmem=""
+  local anon srec kstk pt
+  anon="" && srec="" && kstk="" && pt=""
   if [[ "$gran" == "both" || "$gran" == "coarse" ]]; then
     IFS=$'\t' read -r mt ma mf c s b < <(_bench_meminfo_coarse_kb)
+    shmem="$(awk '/^Shmem:/ {print $2 + 0; exit}' /proc/meminfo)"
+    IFS=$'\t' read -r anon srec kstk pt _ < <(_bench_meminfo_breakdown_kb)
   fi
 
   local ctr_rss shim_rss qemu_rss snap_bytes run_bytes
+  local ctr_pss shim_pss qemu_pss
+  local cg_ctr_cur cg_shim_cur cg_qemu_cur cg_rt_cur
+  local cg_rt_anon cg_rt_file cg_rt_slab cg_rt_shmem
+  local pss_all
   local thin_pool_id thin_d thin_m thin_du thin_meta_u thin_msrc
   ctr_rss="" && shim_rss="" && qemu_rss="" && snap_bytes="" && run_bytes=""
+  ctr_pss="" && shim_pss="" && qemu_pss=""
+  cg_ctr_cur="" && cg_shim_cur="" && cg_qemu_cur="" && cg_rt_cur=""
+  cg_rt_anon="" && cg_rt_file="" && cg_rt_slab="" && cg_rt_shmem=""
+  pss_all=""
   thin_pool_id="" && thin_d="" && thin_m="" && thin_du="" && thin_meta_u="" && thin_msrc=""
 
   if [[ "$gran" == "both" || "$gran" == "fine" ]]; then
     ctr_rss="$(_bench_containerd_main_rss_kb)"
     shim_rss="$(_bench_rss_sum_args_match 'containerd-shim-urunc-v2')"
     qemu_rss="$(_bench_rss_sum_args_match 'qemu-system')"
+    local cpid
+    cpid="$(_bench_containerd_main_pid 2>/dev/null || true)"
+    if [[ -n "$cpid" ]]; then
+      ctr_pss="$(_bench_pss_kb_pid "$cpid")"
+    fi
+    shim_pss="$(_bench_pss_sum_args_match 'containerd-shim-urunc-v2')"
+    qemu_pss="$(_bench_pss_sum_args_match 'qemu-system')"
+
+    if [[ "${RESOURCE_PSS_ALL:-0}" == "1" ]]; then
+      local re="${RESOURCE_PSS_ALL_TAG_REGEX:-^(before_|after_start_.*_settle_|after_cleanup_)}"
+      if [[ "$tag" =~ $re ]]; then
+        pss_all="$(_bench_pss_sum_all_kb)"
+      fi
+    fi
+
+    if [[ "$(_bench_cg_mode)" != "none" ]]; then
+      # containerd cgroup: prefer systemd ControlGroup path; fallback to pid cgroup.
+      local cg_ctr
+      cg_ctr="$(_bench_systemd_service_cg_path containerd.service)"
+      [[ -z "$cg_ctr" && -n "$cpid" ]] && cg_ctr="$(_bench_pid_cg_path_memory_controller "$cpid")"
+      if [[ -n "$cg_ctr" ]]; then
+        cg_ctr_cur="$(_bench_cg_read_current_bytes "$cg_ctr")"
+      fi
+
+      # runtime related pids: shims + qemu
+      local shim_pids qemu_pids
+      shim_pids="$(ps -eo pid=,args= 2>/dev/null | awk '$0 ~ /containerd-shim-urunc-v2/ {gsub(/^[[:space:]]+/, "", $1); print $1}')"
+      qemu_pids="$(ps -eo pid=,args= 2>/dev/null | awk '$0 ~ /qemu-system/ {gsub(/^[[:space:]]+/, "", $1); print $1}')"
+      # sum current bytes by unique cgroup path
+      # shellcheck disable=SC2206
+      cg_shim_cur="$(_bench_cgv2_sum_current_bytes_for_pids ${shim_pids:-})"
+      # shellcheck disable=SC2206
+      cg_qemu_cur="$(_bench_cgv2_sum_current_bytes_for_pids ${qemu_pids:-})"
+      if [[ -n "$cg_ctr_cur" ]]; then
+        cg_rt_cur=$((cg_ctr_cur + cg_shim_cur + cg_qemu_cur))
+      else
+        cg_rt_cur=$((cg_shim_cur + cg_qemu_cur))
+      fi
+
+      # breakdown from memory.stat (anon/file/slab/shmem) for shim+qemu (containerd omitted to avoid double-count if parent slice includes them)
+      # shellcheck disable=SC2206
+      if [[ "$(_bench_cg_mode)" == "v2" ]]; then
+        # v2 keys
+        # shellcheck disable=SC2206
+        cg_rt_anon="$(_bench_cgv2_sum_stat_value_for_pids anon ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_file="$(_bench_cgv2_sum_stat_value_for_pids file ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_slab="$(_bench_cgv2_sum_stat_value_for_pids slab ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_shmem="$(_bench_cgv2_sum_stat_value_for_pids shmem ${shim_pids:-} ${qemu_pids:-})"
+      else
+        # v1 memory.stat total_* keys (approx mapping)
+        # shellcheck disable=SC2206
+        cg_rt_anon="$(_bench_cgv2_sum_stat_value_for_pids total_rss ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_file="$(_bench_cgv2_sum_stat_value_for_pids total_cache ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_slab="$(_bench_cgv2_sum_stat_value_for_pids total_slab ${shim_pids:-} ${qemu_pids:-})"
+        # shellcheck disable=SC2206
+        cg_rt_shmem="$(_bench_cgv2_sum_stat_value_for_pids total_shmem ${shim_pids:-} ${qemu_pids:-})"
+      fi
+    fi
 
     if [[ "${RESOURCE_SAMPLE_LIGHT:-0}" != "1" ]]; then
       local spath
@@ -518,13 +764,41 @@ bench_resource_sample_line_v2() {
   cstart="${BENCH_CONTAINER_START_SEC:-${BENCH_CONTAINER_START_MEAN_SEC:-}}"
   bel="${BENCH_BATCH_ELAPSED_SEC:-}"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -Iseconds)" "$tag" "$label" "$ns" "$snap" \
-    "${mt:-}" "${ma:-}" "${mf:-}" "${c:-}" "${s:-}" "${b:-}" \
-    "${ctr_rss:-}" "${shim_rss:-}" "${qemu_rss:-}" \
+    "${mt:-}" "${ma:-}" "${mf:-}" "${c:-}" "${s:-}" "${b:-}" "${shmem:-}" \
+    "${anon:-}" "${srec:-}" "${kstk:-}" "${pt:-}" \
+    "${ctr_rss:-}" "${shim_rss:-}" "${qemu_rss:-}" "${ctr_pss:-}" "${shim_pss:-}" "${qemu_pss:-}" \
+    "${cg_ctr_cur:-}" "${cg_shim_cur:-}" "${cg_qemu_cur:-}" "${cg_rt_cur:-}" \
+    "${cg_rt_anon:-}" "${cg_rt_file:-}" "${cg_rt_slab:-}" "${cg_rt_shmem:-}" \
+    "${pss_all:-}" \
     "${snap_bytes:-}" "${run_bytes:-}" \
     "${thin_pool_id:-}" "${thin_d:-}" "${thin_m:-}" "${thin_du:-}" "${thin_meta_u:-}" "${thin_msrc:-}" \
     "${snap_count:-}" "${run_cnt:-}" \
     "${cstart:-}" "${bel:-}" \
     "$note"
+}
+
+# after_start 后额外多次采样（在首条 after_start_* 行写入 TSV 之后调用；容器仍在运行时）
+# RESOURCE_START_SETTLE=1
+# RESOURCE_START_SAMPLE_DELAYS=5,20,60  从 after_start 时刻起的「绝对秒数」间隔（内部用增量 sleep）
+RESOURCE_START_SETTLE="${RESOURCE_START_SETTLE:-0}"
+RESOURCE_START_SAMPLE_DELAYS="${RESOURCE_START_SAMPLE_DELAYS:-5,20,60}"
+
+bench_resource_v2_emit_start_settle() {
+  local tag_base="$1" ns="$2" snap="$3"
+  [[ "${RESOURCE_START_SETTLE:-0}" != "1" ]] && return 0
+  [[ "${RESOURCE_SAMPLE:-0}" != "1" ]] && return 0
+  [[ "${RESOURCE_FORMAT:-v2}" == "legacy" ]] && return 0
+  local prev=0 d line
+  IFS=',' read -ra delays <<<"${RESOURCE_START_SAMPLE_DELAYS:-5,20,60}"
+  for d in "${delays[@]}"; do
+    d="${d// /}"
+    [[ -z "$d" ]] || ! [[ "$d" =~ ^[0-9]+$ ]] && continue
+    sleep $((d - prev)) || true
+    prev=$d
+    line="$(bench_resource_sample_line_v2 "${tag_base}_settle_${d}s" "$ns" "$snap")"
+    printf '%s\n' "[resource] $line"
+    [[ -n "${RESULT_TSV:-}" ]] && printf '%s\n' "$line" >>"${RESULT_TSV}"
+  done
 }
