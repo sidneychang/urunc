@@ -87,6 +87,67 @@ $ cat /tmp/urunc.zlog | grep TS
 
 > Note: the timestamp destination (`/tmp/urunc.zlog`) is hardcoded for the time being.
 
+## Startup phase profiling for rootfs/view analysis
+
+Besides the fixed `TSxx` timestamps, `urunc` also supports a lightweight
+phase-based startup profiler for diagnosing:
+
+- normal serial startup latency
+- concurrent startup latency
+- snapshot-view versus no-view overhead
+- cleanup costs on the delete path
+
+Enable it by setting:
+
+```bash
+export URUNC_PROFILE_STARTUP=1
+```
+
+When enabled, both `containerd-shim-urunc-v2` and `urunc` emit structured log
+entries with:
+
+- `phase`
+- `duration_ms`
+- `container`
+- `container_id`
+- `shared_view_id`
+- `view_key`
+- `mount_path`
+- `from_snapshot_view`
+
+Representative `shiminject` phases:
+
+- `shiminject.create_snapshot_view.total`
+- `shiminject.resolve_snapshot_key.total`
+- `shiminject.shared_view.lock.wait`
+- `shiminject.shared_view.lock.hold`
+- `shiminject.shared_view.snapshot_view`
+- `shiminject.shared_view.snapshot_mounts`
+- `shiminject.shared_view.mount.total`
+- `shiminject.shared_view.mount.perform`
+- `shiminject.shared_view.register_user`
+- `shiminject.config.inject_view_path.total`
+- `shiminject.cleanup_snapshot_view.total`
+
+Representative `unikontainers` phases:
+
+- `unikontainers.rootfs.choose`
+- `unikontainers.rootfs.try_container_block`
+- `unikontainers.block.handle_rootfs_total`
+- `unikontainers.block.handle_container_rootfs_as_block`
+- `unikontainers.block.bind_view_files`
+- `unikontainers.block.copy_mountfiles`
+- `unikontainers.block.extract_files`
+- `unikontainers.block.prepare_dmas_block`
+- `unikontainers.delete.cleanup_snapshot_view_bind_mounts`
+
+This profiling is intended to answer questions such as:
+
+- is the slowdown caused by `SnapshotService.View` / `Mounts`?
+- are concurrent runs waiting on the shared-view lock?
+- is the no-view path actually dominated by file copy, or by later block setup?
+- is delete/cleanup interfering with subsequent create timings?
+
 ## Gathering the timestamps
 
 There are 3 Python utilities inside the `script/performance` directory to help gather the timestamps.
