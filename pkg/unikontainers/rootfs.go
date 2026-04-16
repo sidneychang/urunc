@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
@@ -57,6 +58,9 @@ func (rs *rootfsSelector) tryInitrd() (types.RootfsParams, bool) {
 
 // tryExplicitBlock checks for explicit block device annotation with
 // a mountpoint at "/"
+// For explicit block files (e.g., /rootfs.ext2 inside the container), we
+// don't need snapshot view optimization because the VMM accesses the file
+// directly, not the underlying block device.
 func (rs *rootfsSelector) tryExplicitBlock() (types.RootfsParams, bool) {
 	blockPath := rs.annot[annotBlock]
 	blockMntPoint := rs.annot[annotBlockMntPoint]
@@ -65,6 +69,13 @@ func (rs *rootfsSelector) tryExplicitBlock() (types.RootfsParams, bool) {
 	if blockPath == "" || blockMntPoint != "/" || !rs.unikernel.SupportsBlock() {
 		return types.RootfsParams{}, false
 	}
+
+	// For explicit block files, use the file directly from container rootfs
+	// No need for snapshot view optimization in this scenario
+	uniklog.WithFields(logrus.Fields{
+		"block_path":  blockPath,
+		"cntr_rootfs": rs.cntrRootfs,
+	}).Debug("Using explicit block file from container rootfs")
 
 	return newRootfsResult("block", blockPath, "", rs.cntrRootfs), true
 }
@@ -87,12 +98,65 @@ func (rs *rootfsSelector) shouldMountContainerRootfs() bool {
 }
 
 // tryContainerBlockRootfs checks if container rootfs can be used as a block device
-// for guest's rootfs
+// for guest's rootfs. It first tries to use a snapshot view if enabled, otherwise
+// falls back to the direct block device approach.
 func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
+	timer := startPhaseTimer("unikontainers.rootfs.try_container_block", logrus.Fields{
+		"cntr_rootfs": rs.cntrRootfs,
+	})
+	defer timer.done(nil)
 	if !rs.unikernel.SupportsBlock() {
 		return types.RootfsParams{}, false
 	}
 
+	// Try snapshot view optimization if the shim has already created and
+	// mounted a view for us. Unlike the previous implementation, urunc no
+	// longer talks to containerd directly; it only consumes annotations and
+	// mountpoints prepared by the shim.
+	viewMountPath := rs.annot[annotSnapshotViewMountPath]
+
+	if viewMountPath != "" {
+		uniklog.WithFields(logrus.Fields{
+			"view_mount":  viewMountPath,
+			"cntr_rootfs": rs.cntrRootfs,
+		}).Info("Using pre-created snapshot view for container rootfs (shim-managed, read-only, no copy)")
+
+		// Discover the active rootfs block device; this is what we will pass
+		// to the guest as rootfs. The snapshot view is only used to read
+		// unikernel/initrd/urunc.json without copying.
+		activeRootfsDevice, derr := getMountInfo(rs.cntrRootfs)
+		if derr != nil {
+			uniklog.WithError(derr).Warn("Failed to get active rootfs mount info while using snapshot view; falling back to direct block device approach")
+		} else {
+			// Optionally discover the block device backing the view (for
+			// logging/observability only).
+			var viewBlockDevice string
+			if bd, err := getBlockDeviceFromMount(viewMountPath); err == nil {
+				viewBlockDevice = bd
+			} else {
+				uniklog.WithError(err).WithField("view_mount", viewMountPath).Debug("Could not discover block device for snapshot view mount")
+			}
+
+			uniklog.
+				WithField("view_mount", viewMountPath).
+				WithField("view_block_device", viewBlockDevice).
+				WithField("active_block_device", activeRootfsDevice.Source).
+				Info("Using snapshot view for container rootfs (no file copy needed, shim-managed)")
+
+			result := newRootfsResult("block", activeRootfsDevice.Source, rs.cntrRootfs, rs.cntrRootfs)
+			result.FromSnapshotView = true
+			result.SnapshotView = &types.SnapshotViewResult{
+				MountPath:   viewMountPath,
+				BlockDevice: viewBlockDevice,
+			}
+			return result, true
+		}
+	} else {
+		uniklog.Debug("Snapshot view skipped: no snapshot view mount path annotation")
+	}
+
+	// Original logic: use the container rootfs block device directly
+	uniklog.WithField("cntr_rootfs", rs.cntrRootfs).Debug("Using direct block device (no snapshot view)")
 	rootFsDevice, err := getMountInfo(rs.cntrRootfs)
 	if err != nil {
 		uniklog.Errorf("failed to get container's rootfs mount info: %v", err)
@@ -102,6 +166,13 @@ func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
 	if !rs.unikernel.SupportsFS(rootFsDevice.FsType) {
 		return types.RootfsParams{}, false
 	}
+
+	// Log that we are about to use a block-based snapshot device (e.g. devmapper/blockfile)
+	uniklog.
+		WithField("rootfs_mountpoint", rs.cntrRootfs).
+		WithField("block_device", rootFsDevice.Source).
+		WithField("fs_type", rootFsDevice.FsType).
+		Info("Using container rootfs block device as guest rootfs (block-based snapshotter, e.g. devmapper/blockfile)")
 
 	return newRootfsResult("block", rootFsDevice.Source, rs.cntrRootfs, rs.cntrRootfs), true
 }
@@ -196,6 +267,12 @@ func switchMonRootfs(res types.RootfsParams, bundle string) (types.RootfsParams,
 //  5. No rootfs
 func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
 	unikernel types.Unikernel, vmm types.VMM, vfsdPath string) (types.RootfsParams, error) {
+	timer := startPhaseTimer("unikontainers.rootfs.choose", logrus.Fields{
+		"bundle":      bundle,
+		"cntr_rootfs": cntrRootfs,
+	})
+	var retErr error
+	defer func() { timer.done(retErr) }()
 
 	selector := &rootfsSelector{
 		bundle:     bundle,
@@ -221,11 +298,13 @@ func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
 	// Priority 3 & 4: Container rootfs (block or shared-fs)
 	result, ok = selector.tryContainerRootfs()
 	if ok {
-		return switchMonRootfs(result, bundle)
+		result, retErr = switchMonRootfs(result, bundle)
+		return result, retErr
 	}
 
 	if selector.shouldMountContainerRootfs() {
-		return types.RootfsParams{}, fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
+		retErr = fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
+		return types.RootfsParams{}, retErr
 	}
 
 	uniklog.Info("no rootfs configured for guest")
