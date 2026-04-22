@@ -1,0 +1,843 @@
+{
+  "n": 200,
+  "before_tag": "before_sequential_200",
+  "stable_tag": "after_start_200_of_200_settle_60s",
+  "cleanup_tag": "after_cleanup_sequential_200",
+  "cleanup_settle_tag": "after_cleanup_sequential_200_settle_60s",
+  "view": {
+    "before": {
+      "mem_shmem_mib": 11.7265625,
+      "mem_avail_mib": 247457.6015625,
+      "mem_anon_mib": 2286.015625,
+      "pss_total_mib": 79.345703125,
+      "rss_total_mib": 38.9765625,
+      "thin_data_used_mib": 874.5,
+      "thin_meta_used_mib": 2210.0,
+      "snapshotter_root_mib": 112641.25,
+      "run_containerd_mib": 0.0,
+      "_raw": {
+        "mem_shmem_kb": 12008,
+        "mem_avail_kb": 253396584,
+        "mem_anonpages_kb": 2340880,
+        "pss_total_kb": 81250,
+        "rss_total_kb": 39912,
+        "thin_data_used_bytes": 916979712,
+        "thin_meta_used_bytes": 2317352960,
+        "snapshotter_root_bytes": 118112911360,
+        "run_containerd_bytes": 0
+      }
+    },
+    "stable": {
+      "mem_shmem_mib": 24.234375,
+      "mem_avail_mib": 224732.48046875,
+      "mem_anon_mib": 24169.7109375,
+      "pss_total_mib": 19007.876953125,
+      "rss_total_mib": 22491.0078125,
+      "thin_data_used_mib": 2474.5,
+      "thin_meta_used_mib": 2511.0,
+      "snapshotter_root_mib": 112641.25,
+      "run_containerd_mib": 2404.8331937789917,
+      "_raw": {
+        "mem_shmem_kb": 24816,
+        "mem_avail_kb": 230126060,
+        "mem_anonpages_kb": 24749784,
+        "pss_total_kb": 19464066,
+        "rss_total_kb": 23030792,
+        "thin_data_used_bytes": 2594701312,
+        "thin_meta_used_bytes": 2632974336,
+        "snapshotter_root_bytes": 118112911360,
+        "run_containerd_bytes": 2521650371
+      }
+    },
+    "delta": {
+      "mem_shmem_mib": 12.5078125,
+      "mem_avail_mib": -22725.12109375,
+      "mem_anon_mib": 21883.6953125,
+      "pss_total_mib": 18928.53125,
+      "rss_total_mib": 22452.03125,
+      "thin_data_used_mib": 1600.0,
+      "thin_meta_used_mib": 301.0,
+      "snapshotter_root_mib": 0.0,
+      "run_containerd_mib": 2404.8331937789917
+    }
+  },
+  "noview": {
+    "before": {
+      "mem_shmem_mib": 11.73046875,
+      "mem_avail_mib": 247077.7578125,
+      "mem_anon_mib": 2662.6484375,
+      "pss_total_mib": 89.9736328125,
+      "rss_total_mib": 56.375,
+      "thin_data_used_mib": 874.5,
+      "thin_meta_used_mib": 2210.0,
+      "snapshotter_root_mib": 112641.25,
+      "run_containerd_mib": 0.0,
+      "_raw": {
+        "mem_shmem_kb": 12012,
+        "mem_avail_kb": 253007624,
+        "mem_anonpages_kb": 2726552,
+        "pss_total_kb": 92133,
+        "rss_total_kb": 57728,
+        "thin_data_used_bytes": 916979712,
+        "thin_meta_used_bytes": 2317352960,
+        "snapshotter_root_bytes": 118112911360,
+        "run_containerd_bytes": 0
+      }
+    },
+    "stable": {
+      "mem_shmem_mib": 1415.63671875,
+      "mem_avail_mib": 222562.65234375,
+      "mem_anon_mib": 24838.33203125,
+      "pss_total_mib": 18879.7822265625,
+      "rss_total_mib": 21399.28515625,
+      "thin_data_used_mib": 2474.5,
+      "thin_meta_used_mib": 2511.0,
+      "snapshotter_root_mib": 112641.25,
+      "run_containerd_mib": 2403.8924894332886,
+      "_raw": {
+        "mem_shmem_kb": 1449612,
+        "mem_avail_kb": 227904156,
+        "mem_anonpages_kb": 25434452,
+        "pss_total_kb": 19332897,
+        "rss_total_kb": 21912868,
+        "thin_data_used_bytes": 2594701312,
+        "thin_meta_used_bytes": 2632974336,
+        "snapshotter_root_bytes": 118112911360,
+        "run_containerd_bytes": 2520663971
+      }
+    },
+    "delta": {
+      "mem_shmem_mib": 1403.90625,
+      "mem_avail_mib": -24515.10546875,
+      "mem_anon_mib": 22175.68359375,
+      "pss_total_mib": 18789.80859375,
+      "rss_total_mib": 21342.91015625,
+      "thin_data_used_mib": 1600.0,
+      "thin_meta_used_mib": 301.0,
+      "snapshotter_root_mib": 0.0,
+      "run_containerd_mib": 2403.8924894332886
+    }
+  },
+  "trend_after_start_points": [
+    {
+      "i": 10,
+      "view": {
+        "mem_shmem_mib": 12.35546875,
+        "mem_avail_mib": 246068.48046875,
+        "mem_anon_mib": 3306.61328125,
+        "pss_total_mib": 1072.3544921875,
+        "rss_total_mib": 1163.8828125,
+        "thin_data_used_mib": 896.5,
+        "thin_meta_used_mib": 2225.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 120.18343734741211
+      },
+      "noview": {
+        "mem_shmem_mib": 81.92578125,
+        "mem_avail_mib": 245492.19140625,
+        "mem_anon_mib": 3645.24609375,
+        "pss_total_mib": 1055.654296875,
+        "rss_total_mib": 1115.95703125,
+        "thin_data_used_mib": 917.0,
+        "thin_meta_used_mib": 2225.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 120.13640213012695
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -69.5703125,
+        "mem_avail_mib": 576.2890625,
+        "mem_anon_mib": -338.6328125,
+        "pss_total_mib": 16.7001953125,
+        "rss_total_mib": 47.92578125,
+        "thin_data_used_mib": -20.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.04703521728515625
+      }
+    },
+    {
+      "i": 20,
+      "view": {
+        "mem_shmem_mib": 12.98046875,
+        "mem_avail_mib": 244663.3203125,
+        "mem_anon_mib": 4376.86328125,
+        "pss_total_mib": 2015.701171875,
+        "rss_total_mib": 2280.921875,
+        "thin_data_used_mib": 974.5,
+        "thin_meta_used_mib": 2240.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 240.37296104431152
+      },
+      "noview": {
+        "mem_shmem_mib": 152.12109375,
+        "mem_avail_mib": 244007.3515625,
+        "mem_anon_mib": 4711.98046875,
+        "pss_total_mib": 1993.3779296875,
+        "rss_total_mib": 2181.41015625,
+        "thin_data_used_mib": 996.0,
+        "thin_meta_used_mib": 2240.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 240.2788906097412
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -139.140625,
+        "mem_avail_mib": 655.96875,
+        "mem_anon_mib": -335.1171875,
+        "pss_total_mib": 22.3232421875,
+        "rss_total_mib": 99.51171875,
+        "thin_data_used_mib": -21.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.0940704345703125
+      }
+    },
+    {
+      "i": 30,
+      "view": {
+        "mem_shmem_mib": 13.59375,
+        "mem_avail_mib": 243515.87890625,
+        "mem_anon_mib": 5450.7421875,
+        "pss_total_mib": 2962.0732421875,
+        "rss_total_mib": 3394.375,
+        "thin_data_used_mib": 1054.5,
+        "thin_meta_used_mib": 2255.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 360.56858825683594
+      },
+      "noview": {
+        "mem_shmem_mib": 222.31640625,
+        "mem_avail_mib": 242581.25390625,
+        "mem_anon_mib": 5827.609375,
+        "pss_total_mib": 2936.9990234375,
+        "rss_total_mib": 3258.90625,
+        "thin_data_used_mib": 1080.0,
+        "thin_meta_used_mib": 2255.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 360.42748260498047
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -208.72265625,
+        "mem_avail_mib": 934.625,
+        "mem_anon_mib": -376.8671875,
+        "pss_total_mib": 25.07421875,
+        "rss_total_mib": 135.46875,
+        "thin_data_used_mib": -25.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.14110565185546875
+      }
+    },
+    {
+      "i": 40,
+      "view": {
+        "mem_shmem_mib": 14.21875,
+        "mem_avail_mib": 242358.44921875,
+        "mem_anon_mib": 6522.8203125,
+        "pss_total_mib": 3905.83203125,
+        "rss_total_mib": 4513.76171875,
+        "thin_data_used_mib": 1140.5,
+        "thin_meta_used_mib": 2270.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 480.77031898498535
+      },
+      "noview": {
+        "mem_shmem_mib": 292.51171875,
+        "mem_avail_mib": 241513.48046875,
+        "mem_anon_mib": 6876.7734375,
+        "pss_total_mib": 3869.896484375,
+        "rss_total_mib": 4326.765625,
+        "thin_data_used_mib": 1161.0,
+        "thin_meta_used_mib": 2270.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 480.5821781158447
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -278.29296875,
+        "mem_avail_mib": 844.96875,
+        "mem_anon_mib": -353.953125,
+        "pss_total_mib": 35.935546875,
+        "rss_total_mib": 186.99609375,
+        "thin_data_used_mib": -20.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.188140869140625
+      }
+    },
+    {
+      "i": 50,
+      "view": {
+        "mem_shmem_mib": 14.85546875,
+        "mem_avail_mib": 241151.75390625,
+        "mem_anon_mib": 7595.3359375,
+        "pss_total_mib": 4850.189453125,
+        "rss_total_mib": 5639.66796875,
+        "thin_data_used_mib": 1217.5,
+        "thin_meta_used_mib": 2285.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 600.9781532287598
+      },
+      "noview": {
+        "mem_shmem_mib": 362.70703125,
+        "mem_avail_mib": 240312.0546875,
+        "mem_anon_mib": 7959.32421875,
+        "pss_total_mib": 4810.310546875,
+        "rss_total_mib": 5405.82421875,
+        "thin_data_used_mib": 1237.5,
+        "thin_meta_used_mib": 2285.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 600.742977142334
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -347.8515625,
+        "mem_avail_mib": 839.69921875,
+        "mem_anon_mib": -363.98828125,
+        "pss_total_mib": 39.87890625,
+        "rss_total_mib": 233.84375,
+        "thin_data_used_mib": -20.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.23517608642578125
+      }
+    },
+    {
+      "i": 60,
+      "view": {
+        "mem_shmem_mib": 15.46875,
+        "mem_avail_mib": 239844.77734375,
+        "mem_anon_mib": 9002.61328125,
+        "pss_total_mib": 5796.9755859375,
+        "rss_total_mib": 6755.78125,
+        "thin_data_used_mib": 1301.0,
+        "thin_meta_used_mib": 2300.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 721.1920909881592
+      },
+      "noview": {
+        "mem_shmem_mib": 432.90234375,
+        "mem_avail_mib": 239250.609375,
+        "mem_anon_mib": 9017.328125,
+        "pss_total_mib": 5745.1904296875,
+        "rss_total_mib": 6476.16796875,
+        "thin_data_used_mib": 1320.5,
+        "thin_meta_used_mib": 2300.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 720.9098796844482
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -417.43359375,
+        "mem_avail_mib": 594.16796875,
+        "mem_anon_mib": -14.71484375,
+        "pss_total_mib": 51.78515625,
+        "rss_total_mib": 279.61328125,
+        "thin_data_used_mib": -19.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.2822113037109375
+      }
+    },
+    {
+      "i": 70,
+      "view": {
+        "mem_shmem_mib": 16.09375,
+        "mem_avail_mib": 238680.92578125,
+        "mem_anon_mib": 10088.12890625,
+        "pss_total_mib": 6745.357421875,
+        "rss_total_mib": 7886.58203125,
+        "thin_data_used_mib": 1378.0,
+        "thin_meta_used_mib": 2315.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 841.4121322631836
+      },
+      "noview": {
+        "mem_shmem_mib": 503.015625,
+        "mem_avail_mib": 238069.5546875,
+        "mem_anon_mib": 10081.86328125,
+        "pss_total_mib": 6684.3291015625,
+        "rss_total_mib": 7531.88671875,
+        "thin_data_used_mib": 1400.5,
+        "thin_meta_used_mib": 2315.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 841.0828857421875
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -486.921875,
+        "mem_avail_mib": 611.37109375,
+        "mem_anon_mib": 6.265625,
+        "pss_total_mib": 61.0283203125,
+        "rss_total_mib": 354.6953125,
+        "thin_data_used_mib": -22.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.32924652099609375
+      }
+    },
+    {
+      "i": 80,
+      "view": {
+        "mem_shmem_mib": 16.71875,
+        "mem_avail_mib": 237641.6484375,
+        "mem_anon_mib": 11178.42578125,
+        "pss_total_mib": 7694.2421875,
+        "rss_total_mib": 9013.68359375,
+        "thin_data_used_mib": 1462.0,
+        "thin_meta_used_mib": 2330.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 961.638277053833
+      },
+      "noview": {
+        "mem_shmem_mib": 573.2109375,
+        "mem_avail_mib": 236856.50390625,
+        "mem_anon_mib": 11145.4296875,
+        "pss_total_mib": 7621.884765625,
+        "rss_total_mib": 8588.55078125,
+        "thin_data_used_mib": 1480.0,
+        "thin_meta_used_mib": 2330.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 961.2619953155518
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -556.4921875,
+        "mem_avail_mib": 785.14453125,
+        "mem_anon_mib": 32.99609375,
+        "pss_total_mib": 72.357421875,
+        "rss_total_mib": 425.1328125,
+        "thin_data_used_mib": -18.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.37628173828125
+      }
+    },
+    {
+      "i": 90,
+      "view": {
+        "mem_shmem_mib": 17.35546875,
+        "mem_avail_mib": 236490.53125,
+        "mem_anon_mib": 12238.9453125,
+        "pss_total_mib": 8639.1650390625,
+        "rss_total_mib": 10138.99609375,
+        "thin_data_used_mib": 1543.5,
+        "thin_meta_used_mib": 2345.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1081.8705253601074
+      },
+      "noview": {
+        "mem_shmem_mib": 643.48828125,
+        "mem_avail_mib": 235780.53515625,
+        "mem_anon_mib": 12205.01953125,
+        "pss_total_mib": 8557.298828125,
+        "rss_total_mib": 9653.6484375,
+        "thin_data_used_mib": 1563.0,
+        "thin_meta_used_mib": 2345.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1081.447208404541
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -626.1328125,
+        "mem_avail_mib": 709.99609375,
+        "mem_anon_mib": 33.92578125,
+        "pss_total_mib": 81.8662109375,
+        "rss_total_mib": 485.34765625,
+        "thin_data_used_mib": -19.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.42331695556640625
+      }
+    },
+    {
+      "i": 100,
+      "view": {
+        "mem_shmem_mib": 17.96875,
+        "mem_avail_mib": 235271.30859375,
+        "mem_anon_mib": 13312.87890625,
+        "pss_total_mib": 9584.7294921875,
+        "rss_total_mib": 11257.625,
+        "thin_data_used_mib": 1622.0,
+        "thin_meta_used_mib": 2360.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1202.1088800430298
+      },
+      "noview": {
+        "mem_shmem_mib": 713.6015625,
+        "mem_avail_mib": 234609.03125,
+        "mem_anon_mib": 13276.484375,
+        "pss_total_mib": 9501.6259765625,
+        "rss_total_mib": 10722.4921875,
+        "thin_data_used_mib": 1646.5,
+        "thin_meta_used_mib": 2360.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1201.6385278701782
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -695.6328125,
+        "mem_avail_mib": 662.27734375,
+        "mem_anon_mib": 36.39453125,
+        "pss_total_mib": 83.103515625,
+        "rss_total_mib": 535.1328125,
+        "thin_data_used_mib": -24.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.4703521728515625
+      }
+    },
+    {
+      "i": 110,
+      "view": {
+        "mem_shmem_mib": 18.60546875,
+        "mem_avail_mib": 234231.65625,
+        "mem_anon_mib": 14391.85546875,
+        "pss_total_mib": 10529.564453125,
+        "rss_total_mib": 12377.7578125,
+        "thin_data_used_mib": 1711.0,
+        "thin_meta_used_mib": 2376.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1322.353416442871
+      },
+      "noview": {
+        "mem_shmem_mib": 783.796875,
+        "mem_avail_mib": 233388.6875,
+        "mem_anon_mib": 14354.015625,
+        "pss_total_mib": 10437.5966796875,
+        "rss_total_mib": 11782.91796875,
+        "thin_data_used_mib": 1726.5,
+        "thin_meta_used_mib": 2375.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1321.8360290527344
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -765.19140625,
+        "mem_avail_mib": 842.96875,
+        "mem_anon_mib": 37.83984375,
+        "pss_total_mib": 91.9677734375,
+        "rss_total_mib": 594.83984375,
+        "thin_data_used_mib": -15.5,
+        "thin_meta_used_mib": 1.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.5173873901367188
+      }
+    },
+    {
+      "i": 120,
+      "view": {
+        "mem_shmem_mib": 19.21875,
+        "mem_avail_mib": 232942.3046875,
+        "mem_anon_mib": 15482.30859375,
+        "pss_total_mib": 11474.021484375,
+        "rss_total_mib": 13509.9375,
+        "thin_data_used_mib": 1791.0,
+        "thin_meta_used_mib": 2391.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1442.604151725769
+      },
+      "noview": {
+        "mem_shmem_mib": 853.8671875,
+        "mem_avail_mib": 231965.7734375,
+        "mem_anon_mib": 15529.48046875,
+        "pss_total_mib": 11380.2099609375,
+        "rss_total_mib": 12854.5546875,
+        "thin_data_used_mib": 1802.5,
+        "thin_meta_used_mib": 2391.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1442.0397291183472
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -834.6484375,
+        "mem_avail_mib": 976.53125,
+        "mem_anon_mib": -47.171875,
+        "pss_total_mib": 93.8115234375,
+        "rss_total_mib": 655.3828125,
+        "thin_data_used_mib": -11.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.564422607421875
+      }
+    },
+    {
+      "i": 130,
+      "view": {
+        "mem_shmem_mib": 19.85546875,
+        "mem_avail_mib": 231950.37109375,
+        "mem_anon_mib": 16540.7890625,
+        "pss_total_mib": 12412.6533203125,
+        "rss_total_mib": 14621.2578125,
+        "thin_data_used_mib": 1866.5,
+        "thin_meta_used_mib": 2406.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1562.8610858917236
+      },
+      "noview": {
+        "mem_shmem_mib": 924.26953125,
+        "mem_avail_mib": 230320.21484375,
+        "mem_anon_mib": 17061.57421875,
+        "pss_total_mib": 12323.1826171875,
+        "rss_total_mib": 13924.140625,
+        "thin_data_used_mib": 1886.0,
+        "thin_meta_used_mib": 2406.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1562.2496280670166
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -904.4140625,
+        "mem_avail_mib": 1630.15625,
+        "mem_anon_mib": -520.78515625,
+        "pss_total_mib": 89.470703125,
+        "rss_total_mib": 697.1171875,
+        "thin_data_used_mib": -19.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.6114578247070312
+      }
+    },
+    {
+      "i": 140,
+      "view": {
+        "mem_shmem_mib": 20.48046875,
+        "mem_avail_mib": 230768.82421875,
+        "mem_anon_mib": 17627.6875,
+        "pss_total_mib": 13367.3671875,
+        "rss_total_mib": 15758.546875,
+        "thin_data_used_mib": 1946.5,
+        "thin_meta_used_mib": 2421.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1683.1242189407349
+      },
+      "noview": {
+        "mem_shmem_mib": 994.3828125,
+        "mem_avail_mib": 229087.66015625,
+        "mem_anon_mib": 18188.2265625,
+        "pss_total_mib": 13250.9892578125,
+        "rss_total_mib": 14989.6953125,
+        "thin_data_used_mib": 1962.5,
+        "thin_meta_used_mib": 2421.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1682.4657258987427
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -973.90234375,
+        "mem_avail_mib": 1681.1640625,
+        "mem_anon_mib": -560.5390625,
+        "pss_total_mib": 116.3779296875,
+        "rss_total_mib": 768.8515625,
+        "thin_data_used_mib": -16.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.6584930419921875
+      }
+    },
+    {
+      "i": 150,
+      "view": {
+        "mem_shmem_mib": 21.10546875,
+        "mem_avail_mib": 229699.08984375,
+        "mem_anon_mib": 18693.2421875,
+        "pss_total_mib": 14301.107421875,
+        "rss_total_mib": 16866.95703125,
+        "thin_data_used_mib": 2026.5,
+        "thin_meta_used_mib": 2436.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1803.3935508728027
+      },
+      "noview": {
+        "mem_shmem_mib": 1064.66015625,
+        "mem_avail_mib": 227892.9453125,
+        "mem_anon_mib": 19252.1484375,
+        "pss_total_mib": 14186.3154296875,
+        "rss_total_mib": 16064.734375,
+        "thin_data_used_mib": 2046.0,
+        "thin_meta_used_mib": 2436.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1802.6880226135254
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1043.5546875,
+        "mem_avail_mib": 1806.14453125,
+        "mem_anon_mib": -558.90625,
+        "pss_total_mib": 114.7919921875,
+        "rss_total_mib": 802.22265625,
+        "thin_data_used_mib": -19.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.7055282592773438
+      }
+    },
+    {
+      "i": 160,
+      "view": {
+        "mem_shmem_mib": 21.71875,
+        "mem_avail_mib": 228592.6484375,
+        "mem_anon_mib": 19765.890625,
+        "pss_total_mib": 15244.2392578125,
+        "rss_total_mib": 18003.53125,
+        "thin_data_used_mib": 2115.5,
+        "thin_meta_used_mib": 2451.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1923.6690816879272
+      },
+      "noview": {
+        "mem_shmem_mib": 1134.7734375,
+        "mem_avail_mib": 226875.31640625,
+        "mem_anon_mib": 20328.15625,
+        "pss_total_mib": 15133.2265625,
+        "rss_total_mib": 17131.4453125,
+        "thin_data_used_mib": 2125.0,
+        "thin_meta_used_mib": 2451.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 1922.9165182113647
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1113.0546875,
+        "mem_avail_mib": 1717.33203125,
+        "mem_anon_mib": -562.265625,
+        "pss_total_mib": 111.0126953125,
+        "rss_total_mib": 872.0859375,
+        "thin_data_used_mib": -9.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.7525634765625
+      }
+    },
+    {
+      "i": 170,
+      "view": {
+        "mem_shmem_mib": 22.35546875,
+        "mem_avail_mib": 227541.21875,
+        "mem_anon_mib": 20844.08984375,
+        "pss_total_mib": 16192.4111328125,
+        "rss_total_mib": 19143.734375,
+        "thin_data_used_mib": 2191.0,
+        "thin_meta_used_mib": 2466.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2043.9508113861084
+      },
+      "noview": {
+        "mem_shmem_mib": 1205.05078125,
+        "mem_avail_mib": 225557.671875,
+        "mem_anon_mib": 21416.46875,
+        "pss_total_mib": 16068.5537109375,
+        "rss_total_mib": 18191.97265625,
+        "thin_data_used_mib": 2205.0,
+        "thin_meta_used_mib": 2466.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2043.1512126922607
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1182.6953125,
+        "mem_avail_mib": 1983.546875,
+        "mem_anon_mib": -572.37890625,
+        "pss_total_mib": 123.857421875,
+        "rss_total_mib": 951.76171875,
+        "thin_data_used_mib": -14.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.7995986938476562
+      }
+    },
+    {
+      "i": 180,
+      "view": {
+        "mem_shmem_mib": 22.97265625,
+        "mem_avail_mib": 226334.6640625,
+        "mem_anon_mib": 21922.4453125,
+        "pss_total_mib": 17136.115234375,
+        "rss_total_mib": 20257.56640625,
+        "thin_data_used_mib": 2271.0,
+        "thin_meta_used_mib": 2481.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2164.238739967346
+      },
+      "noview": {
+        "mem_shmem_mib": 1275.1640625,
+        "mem_avail_mib": 224485.57421875,
+        "mem_anon_mib": 22476.37109375,
+        "pss_total_mib": 17007.1708984375,
+        "rss_total_mib": 19254.02734375,
+        "thin_data_used_mib": 2285.0,
+        "thin_meta_used_mib": 2481.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2163.3921060562134
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1252.19140625,
+        "mem_avail_mib": 1849.08984375,
+        "mem_anon_mib": -553.92578125,
+        "pss_total_mib": 128.9443359375,
+        "rss_total_mib": 1003.5390625,
+        "thin_data_used_mib": -14.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.8466339111328125
+      }
+    },
+    {
+      "i": 190,
+      "view": {
+        "mem_shmem_mib": 23.609375,
+        "mem_avail_mib": 225261.05859375,
+        "mem_anon_mib": 22990.01953125,
+        "pss_total_mib": 18075.4794921875,
+        "rss_total_mib": 21382.78125,
+        "thin_data_used_mib": 2351.0,
+        "thin_meta_used_mib": 2496.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2284.5328674316406
+      },
+      "noview": {
+        "mem_shmem_mib": 1345.359375,
+        "mem_avail_mib": 223020.23046875,
+        "mem_anon_mib": 23716.140625,
+        "pss_total_mib": 17946.5498046875,
+        "rss_total_mib": 20334.0859375,
+        "thin_data_used_mib": 2368.5,
+        "thin_meta_used_mib": 2496.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2283.6391983032227
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1321.75,
+        "mem_avail_mib": 2240.828125,
+        "mem_anon_mib": -726.12109375,
+        "pss_total_mib": 128.9296875,
+        "rss_total_mib": 1048.6953125,
+        "thin_data_used_mib": -17.5,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.8936691284179688
+      }
+    },
+    {
+      "i": 200,
+      "view": {
+        "mem_shmem_mib": 24.234375,
+        "mem_avail_mib": 224098.1484375,
+        "mem_anon_mib": 24073.1875,
+        "pss_total_mib": 19020.1181640625,
+        "rss_total_mib": 22498.8984375,
+        "thin_data_used_mib": 2440.0,
+        "thin_meta_used_mib": 2511.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2404.8331937789917
+      },
+      "noview": {
+        "mem_shmem_mib": 1415.63671875,
+        "mem_avail_mib": 221666.25390625,
+        "mem_anon_mib": 24860.44921875,
+        "pss_total_mib": 18890.6142578125,
+        "rss_total_mib": 21404.21484375,
+        "thin_data_used_mib": 2447.0,
+        "thin_meta_used_mib": 2511.0,
+        "snapshotter_root_mib": 112641.25,
+        "run_containerd_mib": 2403.8924894332886
+      },
+      "diff_view_minus_noview": {
+        "mem_shmem_mib": -1391.40234375,
+        "mem_avail_mib": 2431.89453125,
+        "mem_anon_mib": -787.26171875,
+        "pss_total_mib": 129.50390625,
+        "rss_total_mib": 1094.68359375,
+        "thin_data_used_mib": -7.0,
+        "thin_meta_used_mib": 0.0,
+        "snapshotter_root_mib": 0.0,
+        "run_containerd_mib": 0.940704345703125
+      }
+    }
+  ]
+}
