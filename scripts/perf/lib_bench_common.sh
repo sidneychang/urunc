@@ -28,13 +28,22 @@ _bench_fill_sudo_env_cmd() {
 
 bench_sudo() {
   _bench_fill_sudo_env_cmd
-  sudo "${_BENCH_SUDO_ENV[@]}" "$@"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    # Running as root: avoid sudo to preserve env/avoid env_reset.
+    "${_BENCH_SUDO_ENV[@]}" "$@"
+  else
+    sudo "${_BENCH_SUDO_ENV[@]}" "$@"
+  fi
 }
 
 # /usr/bin/time 只能 exec 外部命令，不能调用 bench_sudo 函数；与 bench_sudo 使用相同代理转发。
 bench_time_nerdctl() {
   _bench_fill_sudo_env_cmd
-  /usr/bin/time -f "%e" sudo "${_BENCH_SUDO_ENV[@]}" nerdctl "$@"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    /usr/bin/time -f "%e" "${_BENCH_SUDO_ENV[@]}" nerdctl "$@"
+  else
+    /usr/bin/time -f "%e" sudo "${_BENCH_SUDO_ENV[@]}" nerdctl "$@"
+  fi
 }
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-/etc/containerd/config.toml}"
 DEVMAPPER_ROOT_PATH="${DEVMAPPER_ROOT_PATH:-/var/lib/containerd/io.containerd.snapshotter.v1.devmapper}"
@@ -143,29 +152,21 @@ bench_resolve_devmapper_thin_lv() {
   return 1
 }
 
-# Parse dmsetup status for dm-thin pool.
-# Typical format:
-#   0 <len> thin-pool <tid> <data_u>/<data_t> <meta_u>/<meta_t> ... - <blocksize_sectors>
-# Where data_u/meta_u are in *blocks* and the last field is the data block size in *sectors*.
-# We convert blocks -> bytes using: blocks * blocksize_sectors * sector_bytes.
-_bench_dmsetup_thin_pool_bytes() {
+# Parse dmsetup status for dm-thin pool and return raw block counters.
+# Output: data_used_blocks data_total_blocks meta_used_blocks meta_total_blocks
+_bench_dmsetup_thin_pool_blocks() {
   local dmname="$1"
   local line
   line="$(bench_sudo dmsetup status "$dmname" 2>/dev/null | head -1)"
   [[ -z "$line" ]] && return 1
-  echo "$line" | awk -v ss="${BENCH_DM_SECTOR_BYTES:-512}" '
+  echo "$line" | awk '
     {
-      bs = $NF
-      if (bs !~ /^[0-9]+$/ || bs <= 0) bs = 1
       for (i = 1; i <= NF; i++) {
         if ($i == "thin-pool" && i + 3 <= NF) {
-          split($(i + 2), a, "/")
-          split($(i + 3), b, "/")
-          du = (a[1] + 0) * bs * ss
-          dt = (a[2] + 0) * bs * ss
-          mu = (b[1] + 0) * bs * ss
-          mt = (b[2] + 0) * bs * ss
-          print du, dt, mu, mt
+          # Kernel status order is: <meta_used>/<meta_total> <data_used>/<data_total>
+          split($(i + 2), meta, "/")
+          split($(i + 3), data, "/")
+          print (data[1] + 0), (data[2] + 0), (meta[1] + 0), (meta[2] + 0)
           exit
         }
       }
@@ -173,12 +174,37 @@ _bench_dmsetup_thin_pool_bytes() {
   '
 }
 
+# Parse dmsetup table for dm-thin pool and return data block size in bytes.
+_bench_dmsetup_thin_pool_data_block_bytes() {
+  local dmname="$1"
+  local line
+  line="$(bench_sudo dmsetup table "$dmname" 2>/dev/null | head -1)"
+  [[ -z "$line" ]] && return 1
+  echo "$line" | awk -v ss="${BENCH_DM_SECTOR_BYTES:-512}" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "thin-pool" && i + 3 <= NF) {
+          bs = $(i + 3)
+          if (bs ~ /^[0-9]+$/ && bs > 0) {
+            print (bs + 0) * ss
+            exit
+          }
+        }
+      }
+    }
+  '
+}
+
 # Outputs: pool_id pct_d pct_m data_used_bytes meta_used_bytes source
+#          data_used_blocks data_total_blocks meta_used_blocks meta_total_blocks
 # source: lvs|dmsetup|none
 _bench_devmapper_thin_metrics() {
   local lv pct_d pct_m du_b meta_used_b src pool_id
-  local lsize line msize secs d_used d_tot m_used m_tot
+  local d_used_blk d_tot_blk m_used_blk m_tot_blk
+  local lsize line msize blk_bytes counters
+  local meta_blk_bytes
   pct_d="" && pct_m="" && du_b="" && meta_used_b="" && src="none" && pool_id=""
+  d_used_blk="" && d_tot_blk="" && m_used_blk="" && m_tot_blk=""
 
   lv="${DEVMAPPER_THIN_LV:-}"
   [[ -z "$lv" ]] && lv="$(bench_resolve_devmapper_thin_lv 2>/dev/null || true)"
@@ -205,13 +231,24 @@ _bench_devmapper_thin_metrics() {
   fi
 
   if [[ "$src" == "none" ]] && [[ -n "$lv" ]] && [[ "$lv" == dm:* ]]; then
-    secs="$(_bench_dmsetup_thin_pool_bytes "${lv#dm:}")"
-    if [[ -n "$secs" ]]; then
-      read -r d_used d_tot m_used m_tot <<<"$secs"
-      du_b="$d_used"
-      meta_used_b="$m_used"
-      [[ -n "$d_tot" && "$d_tot" != 0 ]] && pct_d="$(awk -v u="$d_used" -v t="$d_tot" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
-      [[ -n "$m_tot" && "$m_tot" != 0 ]] && pct_m="$(awk -v u="$m_used" -v t="$m_tot" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+    counters="$(_bench_dmsetup_thin_pool_blocks "${lv#dm:}")"
+    if [[ -n "$counters" ]]; then
+      read -r d_used_blk d_tot_blk m_used_blk m_tot_blk <<<"$counters"
+      [[ -n "$d_tot_blk" && "$d_tot_blk" != 0 ]] && pct_d="$(awk -v u="$d_used_blk" -v t="$d_tot_blk" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+      [[ -n "$m_tot_blk" && "$m_tot_blk" != 0 ]] && pct_m="$(awk -v u="$m_used_blk" -v t="$m_tot_blk" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+      blk_bytes="$(_bench_dmsetup_thin_pool_data_block_bytes "${lv#dm:}")"
+      if [[ -n "$blk_bytes" && "$blk_bytes" =~ ^[0-9]+$ && -n "$d_used_blk" ]]; then
+        du_b="$((d_used_blk * blk_bytes))"
+      fi
+      # dm-thin status reports metadata usage in "metadata blocks" (NOT data blocks).
+      # The kernel docs define these as blocks; in practice this is 4KiB for dm-thin metadata.
+      # Keep this as a single place to override if needed.
+      meta_blk_bytes="${BENCH_DM_THIN_META_BLOCK_BYTES:-4096}"
+      if [[ -n "$meta_blk_bytes" && "$meta_blk_bytes" =~ ^[0-9]+$ && -n "$m_used_blk" ]]; then
+        meta_used_b="$((m_used_blk * meta_blk_bytes))"
+      else
+        meta_used_b=""
+      fi
       src="dmsetup"
     fi
   fi
@@ -220,20 +257,30 @@ _bench_devmapper_thin_metrics() {
     local pname
     pname="$(read_devmapper_pool_name "${CONTAINERD_CONFIG:-/etc/containerd/config.toml}")"
     if [[ -n "$pname" ]]; then
-      secs="$(_bench_dmsetup_thin_pool_bytes "$pname")"
-      if [[ -n "$secs" ]]; then
-        read -r d_used d_tot m_used m_tot <<<"$secs"
-        du_b="$d_used"
-        meta_used_b="$m_used"
+      counters="$(_bench_dmsetup_thin_pool_blocks "$pname")"
+      if [[ -n "$counters" ]]; then
+        read -r d_used_blk d_tot_blk m_used_blk m_tot_blk <<<"$counters"
         pool_id="dm:${pname}"
-        [[ -n "$d_tot" && "$d_tot" != 0 ]] && pct_d="$(awk -v u="$d_used" -v t="$d_tot" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
-        [[ -n "$m_tot" && "$m_tot" != 0 ]] && pct_m="$(awk -v u="$m_used" -v t="$m_tot" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+        [[ -n "$d_tot_blk" && "$d_tot_blk" != 0 ]] && pct_d="$(awk -v u="$d_used_blk" -v t="$d_tot_blk" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+        [[ -n "$m_tot_blk" && "$m_tot_blk" != 0 ]] && pct_m="$(awk -v u="$m_used_blk" -v t="$m_tot_blk" 'BEGIN { if (t>0) printf "%.4f", 100*u/t; else print "" }')"
+        blk_bytes="$(_bench_dmsetup_thin_pool_data_block_bytes "$pname")"
+        if [[ -n "$blk_bytes" && "$blk_bytes" =~ ^[0-9]+$ && -n "$d_used_blk" ]]; then
+          du_b="$((d_used_blk * blk_bytes))"
+        fi
+        meta_blk_bytes="${BENCH_DM_THIN_META_BLOCK_BYTES:-4096}"
+        if [[ -n "$meta_blk_bytes" && "$meta_blk_bytes" =~ ^[0-9]+$ && -n "$m_used_blk" ]]; then
+          meta_used_b="$((m_used_blk * meta_blk_bytes))"
+        else
+          meta_used_b=""
+        fi
         src="dmsetup"
       fi
     fi
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${pool_id:-}" "${pct_d:-}" "${pct_m:-}" "${du_b:-}" "${meta_used_b:-}" "$src"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${pool_id:-}" "${pct_d:-}" "${pct_m:-}" "${du_b:-}" "${meta_used_b:-}" "$src" \
+    "${d_used_blk:-}" "${d_tot_blk:-}" "${m_used_blk:-}" "${m_tot_blk:-}"
 }
 
 # Replace base_image_size inside the devmapper plugin section only.
@@ -609,19 +656,57 @@ _bench_cgv2_sum_stat_value_for_pids() {
 }
 
 bench_resource_print_header_v2() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "timestamp_iso" "tag" "bench_label" "ns" "snapshotter" \
-    "mem_total_kb" "mem_avail_kb" "mem_free_kb" "mem_cached_kb" "mem_slab_kb" "mem_buffers_kb" "mem_shmem_kb" \
-    "mem_anonpages_kb" "mem_sreclaimable_kb" "mem_kernelstack_kb" "mem_pagetables_kb" \
-    "containerd_main_rss_kb" "shim_urunc_rss_sum_kb" "qemu_rss_sum_kb" "containerd_main_pss_kb" "shim_urunc_pss_sum_kb" "qemu_pss_sum_kb" \
-    "cgv2_containerd_current_bytes" "cgv2_shim_current_bytes_sum" "cgv2_qemu_current_bytes_sum" "cgv2_runtime_current_bytes_sum" \
-    "cgv2_runtime_anon_bytes_sum" "cgv2_runtime_file_bytes_sum" "cgv2_runtime_slab_bytes_sum" "cgv2_runtime_shmem_bytes_sum" \
-    "system_pss_all_kb" \
-    "snapshotter_root_bytes" "run_containerd_bytes" \
-    "thin_pool_id" "thin_data_pct" "thin_meta_pct" "thin_data_used_bytes" "thin_meta_used_bytes" "thin_metrics_source" \
-    "snapshot_count" "running_containers" \
-    "container_start_sec" "batch_elapsed_sec" \
+  # NOTE: keep this in sync with bench_resource_sample_line_v2().
+  # Build the header as a single TSV record (avoid printf placeholder mismatch).
+  local cols=(
+    "timestamp_iso" "tag" "bench_label" "ns" "snapshotter"
+    "mem_total_kb" "mem_avail_kb" "mem_free_kb" "mem_cached_kb" "mem_slab_kb" "mem_buffers_kb" "mem_shmem_kb"
+    "mem_anonpages_kb" "mem_sreclaimable_kb" "mem_kernelstack_kb" "mem_pagetables_kb"
+    "containerd_main_rss_kb" "shim_urunc_rss_sum_kb" "qemu_rss_sum_kb" "containerd_main_pss_kb" "shim_urunc_pss_sum_kb" "qemu_pss_sum_kb"
+    "system_pss_all_kb"
+    "snapshotter_root_bytes" "run_containerd_bytes"
+    "run_tmpfs_size_bytes" "run_tmpfs_used_bytes" "run_tmpfs_avail_bytes"
+    "sample_bundle_path" "sample_monrootfs_du_x_bytes" "sample_monrootfs_du_all_bytes"
+    "thin_pool_id" "thin_data_pct" "thin_meta_pct" "thin_data_used_bytes" "thin_meta_used_bytes" "thin_metrics_source"
+    "thin_data_used_blocks" "thin_data_total_blocks" "thin_meta_used_blocks" "thin_meta_total_blocks"
+    "snapshot_count" "running_containers"
+    "container_start_sec" "batch_elapsed_sec"
     "resource_granularity_note"
+  )
+  (IFS=$'\t'; echo "${cols[*]}")
+}
+
+_bench_sample_one_bundle_and_monrootfs_du_bytes() {
+  # Output TSV: bundle_path<TAB>monrootfs_du_x_bytes<TAB>monrootfs_du_all_bytes
+  # - du_x: tmpfs-only (do not follow bind mounts)
+  # - du_all: includes bind-mounted payload sizes (supporting signal only)
+  local ns="${1:-}"
+  local short_cid full_cid bundle mon x all
+  bundle="" && mon="" && x="" && all=""
+
+  [[ -n "$ns" ]] || {
+    printf '\t\t\n'
+    return 0
+  }
+
+  short_cid="$(bench_sudo nerdctl -n "$ns" ps -q 2>/dev/null | head -1 || true)"
+  [[ -n "$short_cid" ]] || {
+    printf '\t\t\n'
+    return 0
+  }
+
+  full_cid="$(bench_sudo nerdctl -n "$ns" inspect -f '{{.ID}}' "$short_cid" 2>/dev/null | head -1 || true)"
+  [[ -n "$full_cid" ]] || full_cid="$short_cid"
+
+  bundle="/run/containerd/io.containerd.runtime.v2.task/${ns}/${full_cid}"
+  mon="${bundle}/monRootfs"
+
+  if [[ -d "$mon" ]]; then
+    x="$(bench_sudo du -sx --block-size=1 "$mon" 2>/dev/null | awk '{print $1}' || true)"
+    all="$(bench_sudo du -s --block-size=1 "$mon" 2>/dev/null | awk '{print $1}' || true)"
+  fi
+
+  printf '%s\t%s\t%s\n' "$bundle" "${x:-}" "${all:-}"
 }
 
 bench_resource_sample_line_v2() {
@@ -644,17 +729,19 @@ bench_resource_sample_line_v2() {
   fi
 
   local ctr_rss shim_rss qemu_rss snap_bytes run_bytes
+  local run_tmpfs_size_b run_tmpfs_used_b run_tmpfs_avail_b
+  local sample_bundle sample_mon_du_x sample_mon_du_all
   local ctr_pss shim_pss qemu_pss
-  local cg_ctr_cur cg_shim_cur cg_qemu_cur cg_rt_cur
-  local cg_rt_anon cg_rt_file cg_rt_slab cg_rt_shmem
   local pss_all
   local thin_pool_id thin_d thin_m thin_du thin_meta_u thin_msrc
+  local thin_d_used_blk thin_d_tot_blk thin_m_used_blk thin_m_tot_blk
   ctr_rss="" && shim_rss="" && qemu_rss="" && snap_bytes="" && run_bytes=""
+  run_tmpfs_size_b="" && run_tmpfs_used_b="" && run_tmpfs_avail_b=""
+  sample_bundle="" && sample_mon_du_x="" && sample_mon_du_all=""
   ctr_pss="" && shim_pss="" && qemu_pss=""
-  cg_ctr_cur="" && cg_shim_cur="" && cg_qemu_cur="" && cg_rt_cur=""
-  cg_rt_anon="" && cg_rt_file="" && cg_rt_slab="" && cg_rt_shmem=""
   pss_all=""
   thin_pool_id="" && thin_d="" && thin_m="" && thin_du="" && thin_meta_u="" && thin_msrc=""
+  thin_d_used_blk="" && thin_d_tot_blk="" && thin_m_used_blk="" && thin_m_tot_blk=""
 
   if [[ "$gran" == "both" || "$gran" == "fine" ]]; then
     ctr_rss="$(_bench_containerd_main_rss_kb)"
@@ -675,55 +762,6 @@ bench_resource_sample_line_v2() {
       fi
     fi
 
-    if [[ "$(_bench_cg_mode)" != "none" ]]; then
-      # containerd cgroup: prefer systemd ControlGroup path; fallback to pid cgroup.
-      local cg_ctr
-      cg_ctr="$(_bench_systemd_service_cg_path containerd.service)"
-      [[ -z "$cg_ctr" && -n "$cpid" ]] && cg_ctr="$(_bench_pid_cg_path_memory_controller "$cpid")"
-      if [[ -n "$cg_ctr" ]]; then
-        cg_ctr_cur="$(_bench_cg_read_current_bytes "$cg_ctr")"
-      fi
-
-      # runtime related pids: shims + qemu
-      local shim_pids qemu_pids
-      shim_pids="$(ps -eo pid=,args= 2>/dev/null | awk '$0 ~ /containerd-shim-urunc-v2/ {gsub(/^[[:space:]]+/, "", $1); print $1}')"
-      qemu_pids="$(ps -eo pid=,args= 2>/dev/null | awk '$0 ~ /qemu-system/ {gsub(/^[[:space:]]+/, "", $1); print $1}')"
-      # sum current bytes by unique cgroup path
-      # shellcheck disable=SC2206
-      cg_shim_cur="$(_bench_cgv2_sum_current_bytes_for_pids ${shim_pids:-})"
-      # shellcheck disable=SC2206
-      cg_qemu_cur="$(_bench_cgv2_sum_current_bytes_for_pids ${qemu_pids:-})"
-      if [[ -n "$cg_ctr_cur" ]]; then
-        cg_rt_cur=$((cg_ctr_cur + cg_shim_cur + cg_qemu_cur))
-      else
-        cg_rt_cur=$((cg_shim_cur + cg_qemu_cur))
-      fi
-
-      # breakdown from memory.stat (anon/file/slab/shmem) for shim+qemu (containerd omitted to avoid double-count if parent slice includes them)
-      # shellcheck disable=SC2206
-      if [[ "$(_bench_cg_mode)" == "v2" ]]; then
-        # v2 keys
-        # shellcheck disable=SC2206
-        cg_rt_anon="$(_bench_cgv2_sum_stat_value_for_pids anon ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_file="$(_bench_cgv2_sum_stat_value_for_pids file ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_slab="$(_bench_cgv2_sum_stat_value_for_pids slab ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_shmem="$(_bench_cgv2_sum_stat_value_for_pids shmem ${shim_pids:-} ${qemu_pids:-})"
-      else
-        # v1 memory.stat total_* keys (approx mapping)
-        # shellcheck disable=SC2206
-        cg_rt_anon="$(_bench_cgv2_sum_stat_value_for_pids total_rss ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_file="$(_bench_cgv2_sum_stat_value_for_pids total_cache ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_slab="$(_bench_cgv2_sum_stat_value_for_pids total_slab ${shim_pids:-} ${qemu_pids:-})"
-        # shellcheck disable=SC2206
-        cg_rt_shmem="$(_bench_cgv2_sum_stat_value_for_pids total_shmem ${shim_pids:-} ${qemu_pids:-})"
-      fi
-    fi
-
     if [[ "${RESOURCE_SAMPLE_LIGHT:-0}" != "1" ]]; then
       local spath
       spath="$(bench_snapshotter_storage_path "$snap")"
@@ -733,9 +771,18 @@ bench_resource_sample_line_v2() {
       if [[ -d "${CONTAINERD_RUN_ROOT}" ]]; then
         run_bytes="$(bench_sudo du -sb "${CONTAINERD_RUN_ROOT}" 2>/dev/null | awk '{print $1}')"
       fi
+      IFS=$'\t' read -r sample_bundle sample_mon_du_x sample_mon_du_all < <(_bench_sample_one_bundle_and_monrootfs_du_bytes "$ns")
       if [[ "$snap" == "devmapper" ]]; then
-        IFS=$'\t' read -r thin_pool_id thin_d thin_m thin_du thin_meta_u thin_msrc < <(_bench_devmapper_thin_metrics)
+        IFS=$'\t' read -r thin_pool_id thin_d thin_m thin_du thin_meta_u thin_msrc thin_d_used_blk thin_d_tot_blk thin_m_used_blk thin_m_tot_blk < <(_bench_devmapper_thin_metrics)
       fi
+    fi
+
+    # /run is typically tmpfs. Capture its capacity/usage (bytes) for visibility.
+    # Uses df(1) with byte units; cheap enough to always sample in fine/both.
+    if command -v df >/dev/null 2>&1; then
+      IFS=$' \t' read -r run_tmpfs_size_b run_tmpfs_used_b run_tmpfs_avail_b < <(
+        df -B1 --output=size,used,avail /run 2>/dev/null | awk 'NR==2 {print $1, $2, $3}'
+      )
     fi
   fi
 
@@ -764,19 +811,22 @@ bench_resource_sample_line_v2() {
   cstart="${BENCH_CONTAINER_START_SEC:-${BENCH_CONTAINER_START_MEAN_SEC:-}}"
   bel="${BENCH_BATCH_ELAPSED_SEC:-}"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -Iseconds)" "$tag" "$label" "$ns" "$snap" \
-    "${mt:-}" "${ma:-}" "${mf:-}" "${c:-}" "${s:-}" "${b:-}" "${shmem:-}" \
-    "${anon:-}" "${srec:-}" "${kstk:-}" "${pt:-}" \
-    "${ctr_rss:-}" "${shim_rss:-}" "${qemu_rss:-}" "${ctr_pss:-}" "${shim_pss:-}" "${qemu_pss:-}" \
-    "${cg_ctr_cur:-}" "${cg_shim_cur:-}" "${cg_qemu_cur:-}" "${cg_rt_cur:-}" \
-    "${cg_rt_anon:-}" "${cg_rt_file:-}" "${cg_rt_slab:-}" "${cg_rt_shmem:-}" \
-    "${pss_all:-}" \
-    "${snap_bytes:-}" "${run_bytes:-}" \
-    "${thin_pool_id:-}" "${thin_d:-}" "${thin_m:-}" "${thin_du:-}" "${thin_meta_u:-}" "${thin_msrc:-}" \
-    "${snap_count:-}" "${run_cnt:-}" \
-    "${cstart:-}" "${bel:-}" \
+  local cols=(
+    "$(date -Iseconds)" "$tag" "$label" "$ns" "$snap"
+    "${mt:-}" "${ma:-}" "${mf:-}" "${c:-}" "${s:-}" "${b:-}" "${shmem:-}"
+    "${anon:-}" "${srec:-}" "${kstk:-}" "${pt:-}"
+    "${ctr_rss:-}" "${shim_rss:-}" "${qemu_rss:-}" "${ctr_pss:-}" "${shim_pss:-}" "${qemu_pss:-}"
+    "${pss_all:-}"
+    "${snap_bytes:-}" "${run_bytes:-}"
+    "${run_tmpfs_size_b:-}" "${run_tmpfs_used_b:-}" "${run_tmpfs_avail_b:-}"
+    "${sample_bundle:-}" "${sample_mon_du_x:-}" "${sample_mon_du_all:-}"
+    "${thin_pool_id:-}" "${thin_d:-}" "${thin_m:-}" "${thin_du:-}" "${thin_meta_u:-}" "${thin_msrc:-}"
+    "${thin_d_used_blk:-}" "${thin_d_tot_blk:-}" "${thin_m_used_blk:-}" "${thin_m_tot_blk:-}"
+    "${snap_count:-}" "${run_cnt:-}"
+    "${cstart:-}" "${bel:-}"
     "$note"
+  )
+  (IFS=$'\t'; echo "${cols[*]}")
 }
 
 # after_start 后额外多次采样（在首条 after_start_* 行写入 TSV 之后调用；容器仍在运行时）

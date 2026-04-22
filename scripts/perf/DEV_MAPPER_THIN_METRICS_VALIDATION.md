@@ -33,7 +33,7 @@
 
 旧实现把 `blocks` 误当成 `sectors`，只乘了 `512`，漏乘了 `blocksize_sectors(=1024)`，导致：
 
-- `thin_data_used_bytes` / `thin_meta_used_bytes` **低估 1024×**
+- `thin_data_used_bytes` / `thin_meta_used_bytes` **低估 1024×**，且旧实现用于解析 `dmsetup status` 时把 `data/meta` 的字段顺序也弄反了（导致 TS V 列语义互换）
 - `thin_data_pct` / `thin_meta_pct` **不受影响**（仍然来自 used/total 的比值）
 
 验证用的基线换算（直接从 `dmsetup status` 得到）：
@@ -42,7 +42,8 @@
 sudo dmsetup status containerd-pool | awk '
 {
   for (i=1;i<=NF;i++) if ($i=="thin-pool") { j=i; break }
-  split($(j+2), d, "/"); split($(j+3), m, "/");
+  # Kernel status order is: <meta_used>/<meta_total> <data_used>/<data_total>
+  split($(j+2), m, "/"); split($(j+3), d, "/");
   bs=$(NF); ss=512;
   du=d[1]*bs*ss; dt=d[2]*bs*ss;
   mu=m[1]*bs*ss; mt=m[2]*bs*ss;
@@ -54,8 +55,8 @@ sudo dmsetup status containerd-pool | awk '
 
 该基线在当时输出为（示例）：
 
-- `data_used_bytes=2317352960`
-- `meta_used_bytes=916979712`
+- `data_used_bytes=916979712`
+- `meta_used_bytes=2317352960`
 - `blocksize_sectors=1024`
 
 而旧脚本同一时刻 TSV 中对应字段为：
@@ -64,6 +65,8 @@ sudo dmsetup status containerd-pool | awk '
 - `thin_meta_used_bytes=895488`
 
 两者比值均为 **1024**（硬证据）。
+
+其中：`thin_data_used_bytes` 对应的是 `meta_used_bytes`（旧列与正确列语义互换），而 `thin_meta_used_bytes` 对应的是 `data_used_bytes`。
 
 ---
 
@@ -179,6 +182,14 @@ sudo dmsetup status containerd-pool | awk '
 
 前面的结论基本说明：在 dm-thin(devmapper) 后端上，**thin-pool 的 data/meta 在稳定采样点收敛一致**；因此如果要证明 view 机制“优化”，通常需要把收益落在 **tmpfs(/run) copy** 与 **内存（特别是 PSS）** 的可解释指标上，而不是“系统总内存观感”。
 
+### 7.0 我们当前要证明的两件事（对齐 15/04 会议结论）
+
+1. **/run 的增长确实来自 urunc 的 copy 行为（no-view）**，而不是 snapshotter 或其他系统组件的长期存储膨胀。
+2. **view snapshot 的存储开销应接近 0（或可忽略）**，需要分别在：
+   - **snapshotter 层（thin data/meta / snapshotter root）**
+   - **/run tmpfs（containerd bundle/monRootfs 等）**
+   做可复现的“稳定采样点”对照。
+
 ### 7.1 为什么要看 PSS（而不是只看 RSS / MemAvailable）
 
 - `RSS` 会对共享页重复计入，难以判断“新增包/进程”带来的**净开销**。
@@ -193,6 +204,11 @@ sudo dmsetup status containerd-pool | awk '
 - `containerd_main_pss_kb`：containerd 主进程 PSS
 - `shim_urunc_pss_sum_kb`：所有 `containerd-shim-urunc-v2` 进程 PSS 汇总
 - `qemu_pss_sum_kb`：所有 `qemu-system*` 进程 PSS 汇总
+-
+- `sample_monrootfs_du_x_bytes` / `sample_monrootfs_du_all_bytes`（新增）：
+  - `sample_monrootfs_du_x_bytes`：对一个“正在运行的容器”的 `bundle/monRootfs` 做 `du -sx`（**只统计 monRootfs 同一文件系统上的字节数**，通常就是 `/run` 上的 tmpfs，用于证明“是否发生了真实 copy 占用 /run”）。
+  - `sample_monrootfs_du_all_bytes`：对同一目录做普通 `du -s`（会跟随 bind mount 进入 snapshot view 等其他文件系统；**只能作为“文件是否可见”的 supporting signal**，不能用于衡量 /run 的真实占用）。
+  - `sample_bundle_path`：该样本对应的 containerd bundle 路径（便于手工复核）。
 
 并增加 **after_start 稳定点采样**（避免 transient）：在 `after_start_N_of_N` 之后可选写入：
 
@@ -257,6 +273,10 @@ python3 scripts/perf/analyze_abab_tsv.py /tmp/urunc-view-noview-abab.tsv --n 50
 - **view 显著降低 Shmem（约 351MiB → 3MiB）**。这与“no-view 在 /run tmpfs 内做 payload copy、view 通过 snapshot view bind-mount 避免 copy”的机制一致；因此 view 在“内存（tmpfs/shmem）”层面确实带来净收益。
 - **PSS_total（containerd + shim + qemu）在 view 下略高（约 +41MiB/50 容器）**，量级约 \(< 1MiB/容器\)，相对 Shmem 的节省可忽略；但要强调：PSS 是更可靠的“进程私有/按共享分摊”指标，RSS 的差异不宜作为主结论。
 - **thin-pool（data/meta used_bytes）在稳定采样点完全一致**（两种模式的 Δ 相同），与前文的“devmapper 存储层面 view/no-view 收敛一致”结论相符：view 的主要收益不在 thin-pool，而在 **/run tmpfs/shmem**。
+
+> 进一步把“/run 增长来自 copy”做成硬证据时，优先引用 `sample_monrootfs_du_x_bytes`：
+> - **no-view**：`du -x` 应显著增大（unikernel/initrd/urunc.json 真正落在 tmpfs）。
+> - **view**：`du -x` 应保持很小（这些 payload 来自 snapshot view 的 bind-mount，tmpfs 只存少量目录/元数据）。
 
 ### 7.6 小规模（N=20）+ 多采样点（1/5/10/20/60s）
 

@@ -13,6 +13,12 @@ RESET_SCRIPT="${RESET_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rese
 # shellcheck source=lib_bench_common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_bench_common.sh"
 
+# Avoid sudo when running as root to preserve environment variables.
+BENCH_SUDO=""
+if [[ "$(id -u)" -ne 0 ]]; then
+  BENCH_SUDO="sudo"
+fi
+
 NAME_PREFIX="${NAME_PREFIX:-urunc-seqbench}"
 SCRIPT_TAG="seqbench-$$"
 NERDCTL_RUN_TIMEOUT_SEC="${NERDCTL_RUN_TIMEOUT_SEC:-180}"
@@ -50,8 +56,12 @@ run_nerdctl_detached_with_timeout() {
   local timeout_sec="${2:-0}"
   local rc=0 out=""
   _bench_fill_sudo_env_cmd
-  local cmd=(
-    sudo "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" run -d
+  local cmd=()
+  if [[ -n "${BENCH_SUDO:-}" ]]; then
+    cmd+=("${BENCH_SUDO}")
+  fi
+  cmd+=(
+    "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" run -d
     --name "$name"
     --runtime "$RUNTIME"
     "$IMAGE"
@@ -80,7 +90,11 @@ ensure_image() {
     local rc=0
     if [[ "$NERDCTL_PULL_TIMEOUT_SEC" =~ ^[0-9]+$ ]] && [[ "$NERDCTL_PULL_TIMEOUT_SEC" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
       _bench_fill_sudo_env_cmd
-      timeout "$NERDCTL_PULL_TIMEOUT_SEC" sudo "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
+      if [[ -n "${BENCH_SUDO:-}" ]]; then
+        timeout "$NERDCTL_PULL_TIMEOUT_SEC" "${BENCH_SUDO}" "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
+      else
+        timeout "$NERDCTL_PULL_TIMEOUT_SEC" "${_BENCH_SUDO_ENV[@]}" nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
+      fi
     else
       bench_sudo nerdctl -n "$NS" --snapshotter "$SNAPSHOTTER" pull "$IMAGE" || rc=$?
     fi

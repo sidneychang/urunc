@@ -15,6 +15,36 @@ N="${N:-50}"
 ROUNDS="${ROUNDS:-5}"
 OUT_TSV="${OUT_TSV:-/tmp/urunc-view-noview-abab.tsv}"
 
+RESET_SCRIPT="${RESET_SCRIPT:-${SCRIPT_DIR}/reset_urunc_bench_state.sh}"
+
+_CLEANUP_DONE=0
+cleanup_on_exit() {
+  local rc=$?
+  [[ "${_CLEANUP_DONE}" == "1" ]] && exit "$rc"
+  _CLEANUP_DONE=1
+  echo "[abab] cleanup-on-exit: rc=$rc (best-effort reset ns=$NS snapshotter=$SNAPSHOTTER)"
+  # Best-effort cleanup to avoid leaving containers/tasks/shims/snapshots when interrupted.
+  NS="$NS" SNAPSHOTTER="$SNAPSHOTTER" "$RESET_SCRIPT" >/dev/null 2>&1 || true
+  exit "$rc"
+}
+trap cleanup_on_exit INT TERM EXIT
+
+strict_reset_ns() {
+  local attempt max_attempts sleep_s
+  max_attempts="${RESET_MAX_ATTEMPTS:-3}"
+  sleep_s="${RESET_RETRY_SLEEP_SEC:-3}"
+  echo "[abab] strict reset start: NS=${NS} SNAPSHOTTER=${SNAPSHOTTER} attempts=${max_attempts}"
+  for attempt in $(seq 1 "$max_attempts"); do
+    echo "[abab] strict reset attempt ${attempt}/${max_attempts}"
+    STRICT_RESET=1 NS="$NS" SNAPSHOTTER="$SNAPSHOTTER" "$RESET_SCRIPT" && return 0
+    echo "[abab] strict reset not clean yet; sleep ${sleep_s}s then retry" >&2
+    sleep "${sleep_s}" || true
+  done
+  echo "[abab] strict reset failed: namespace still not clean after ${max_attempts} attempts" >&2
+  STRICT_RESET=0 NS="$NS" SNAPSHOTTER="$SNAPSHOTTER" "$RESET_SCRIPT" || true
+  return 1
+}
+
 switch_view() {
   (
     cd "$REPO_ROOT"
@@ -31,6 +61,8 @@ run_one() {
   local label
   label="abab_r${round}_${mode}"
 
+  strict_reset_ns
+
   export URUNC_BENCH_NS="$NS"
   export RESOURCE_SAMPLE=1
   export RESULT_TSV="$OUT_TSV"
@@ -46,6 +78,8 @@ run_one() {
   export NERDCTL_RUN_TIMEOUT_SEC="${NERDCTL_RUN_TIMEOUT_SEC:-180}"
   export BENCH_DEBUG="${BENCH_DEBUG:-1}"
   export BENCH_DEBUG_LOG="${BENCH_DEBUG_LOG:-/tmp/urunc-seqbench-debug.log}"
+  # We already reset strictly above; avoid double reset inside urunc_bench.sh.
+  export SKIP_RESET=1
 
   "${SCRIPT_DIR}/urunc_bench.sh" sequential "$SNAPSHOTTER" "$N" --tsv "$OUT_TSV"
 }
