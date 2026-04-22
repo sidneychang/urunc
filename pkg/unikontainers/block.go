@@ -25,6 +25,8 @@ import (
 	"github.com/moby/sys/mount"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
+
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
@@ -79,6 +81,30 @@ func getMountInfo(path string) (types.BlockDevParams, error) {
 	return types.BlockDevParams{}, ErrMountpoint
 }
 
+// bindViewFilesToMonRootfs bind-mounts boot files from the snapshot view into
+// the monitor rootfs without changing permissions on the read-only view.
+func bindViewFilesToMonRootfs(viewMountPath, monRootfs, unikernelPath, initrdPath, uruncJSON string) error {
+	norm := func(p string) string { return strings.TrimPrefix(filepath.Clean(p), "/") }
+	files := []struct{ src, target string }{
+		{filepath.Join(viewMountPath, unikernelPath), norm(unikernelPath)},
+		{filepath.Join(viewMountPath, uruncJSON), norm(uruncJSON)},
+	}
+	if initrdPath != "" {
+		files = append(files, struct{ src, target string }{
+			filepath.Join(viewMountPath, initrdPath), norm(initrdPath),
+		})
+	}
+
+	for _, f := range files {
+		dstPath := filepath.Join(monRootfs, f.target)
+		dstDir := filepath.Dir(dstPath)
+		if err := bindMountFile(f.src, dstDir, dstPath, 0, unix.MS_BIND|unix.MS_PRIVATE, false); err != nil {
+			return fmt.Errorf("bind view %s -> monRootfs/%s: %w", f.src, f.target, err)
+		}
+	}
+	return nil
+}
+
 // extractUnikernelFromBlock moves unikernel binary, initrd and urunc.json
 // files from old rootfsPath to newRootfsPath
 // FIXME: This approach fills up /run with unikernel binaries, initrds and urunc.json
@@ -107,7 +133,6 @@ func extractFilesFromBlock(rootfsPath string, newRootfsPath string, unikernel st
 	if err != nil {
 		return fmt.Errorf("Could not move %s to %s: %w", currentConfigPath, newRootfsPath, err)
 	}
-
 	return nil
 }
 
@@ -124,6 +149,7 @@ func prepareDMAsBlock(rootfsPath string, newRootfsPath string, unikernel string,
 	if err != nil {
 		return err
 	}
+
 	// unmount block device
 	// FIXME: umount and rm might need some retries
 	err = mount.Unmount(rootfsPath)
@@ -170,6 +196,34 @@ func handleExplicitBlockImage(blockImg string, mountPoint string) (types.BlockDe
 }
 
 func handleCntrRootfsAsBlock(rfs types.RootfsParams, unikernelType string, unikernelPath string, uruncJSONFilename string, initrdPath string, mounts []specs.Mount) (types.BlockDevParams, error) {
+	if rfs.SnapshotViewMountPath != "" {
+		if err := bindViewFilesToMonRootfs(rfs.SnapshotViewMountPath, rfs.MonRootfs, unikernelPath, initrdPath, uruncJSONFilename); err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		if err := copyMountfiles(rfs.MountedPath, mounts); err != nil {
+			return types.BlockDevParams{}, err
+		}
+		if err := mount.Unmount(rfs.MountedPath); err != nil {
+			return types.BlockDevParams{}, err
+		}
+
+		err := setupDev(rfs.MonRootfs, rfs.Path)
+		if err != nil {
+			return types.BlockDevParams{}, err
+		}
+		mp := "/"
+		if unikernelType == "rumprun" {
+			mp = "/data"
+		}
+
+		return types.BlockDevParams{
+			Source:     rfs.Path,
+			MountPoint: mp,
+			ID:         "rootfs",
+		}, nil
+	}
+
 	err := copyMountfiles(rfs.MountedPath, mounts)
 	if err != nil {
 		return types.BlockDevParams{}, err
@@ -243,6 +297,7 @@ func handleBlockBasedRootfs(rfs types.RootfsParams, ukernel types.Unikernel, uni
 	var blockArgs []types.BlockDevParams
 	var rootfsBlock types.BlockDevParams
 	var err error
+
 	if rfs.MountedPath == "" {
 		// The Mountpoint in the annotation was "/" and hence the rootfs
 		// of the guest is a block Image inside the container's image.
@@ -250,6 +305,7 @@ func handleBlockBasedRootfs(rfs types.RootfsParams, ukernel types.Unikernel, uni
 	} else {
 		rootfsBlock, err = handleCntrRootfsAsBlock(rfs, unikernelType, unikernelPath, uruncJSONFilename, initrdPath, mounts)
 	}
+
 	if err != nil {
 		return nil, err
 	}
