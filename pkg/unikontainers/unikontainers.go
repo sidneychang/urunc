@@ -89,6 +89,12 @@ func New(bundlePath string, containerID string, rootDir string, cfg *UruncConfig
 
 	confMap := config.Map()
 
+	if spec.Annotations != nil {
+		if v := spec.Annotations[annotSnapshotViewMountPath]; v != "" {
+			confMap[annotSnapshotViewMountPath] = v
+		}
+	}
+
 	maps.Copy(confMap, cfg.Map())
 	containerDir := filepath.Join(rootDir, containerID)
 	state := &specs.State{
@@ -334,6 +340,15 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 		uniklog.Errorf("could not choose guest rootfs: %v", err)
 		return err
 	}
+
+	uniklog.WithFields(logrus.Fields{
+		"container_id":       u.State.ID,
+		"guest_rootfs":       rootfsParams.Type,
+		"rootfs_path":        rootfsParams.Path,
+		"mounted_path":       rootfsParams.MountedPath,
+		"monitor_rootfs":     rootfsParams.MonRootfs,
+		"snapshot_view_path": rootfsParams.SnapshotViewMountPath,
+	}).Debug("Selected guest rootfs configuration")
 
 	// Prepare Monitor rootfs
 	// Make sure that rootfs is mounted with the correct propagation
@@ -594,6 +609,53 @@ func (u *Unikontainer) Kill() error {
 	return nil
 }
 
+// cleanupSnapshotViewBindMounts unmounts bind mounts from the shim-managed
+// snapshot view before the shim removes the shared view device.
+func (u *Unikontainer) cleanupSnapshotViewBindMounts() {
+	if u.State == nil {
+		return
+	}
+	viewMountPath := u.State.Annotations[annotSnapshotViewMountPath]
+	if viewMountPath == "" {
+		return
+	}
+
+	bundleDir := filepath.Clean(u.State.Bundle)
+	monRootfs := filepath.Join(bundleDir, monitorRootfsDirName)
+
+	if _, err := os.Stat(monRootfs); err != nil {
+		if !os.IsNotExist(err) {
+			uniklog.WithError(err).WithField("path", monRootfs).Warn("failed to stat monitor rootfs")
+		}
+		return
+	}
+
+	norm := func(p string) string {
+		return strings.TrimPrefix(filepath.Clean(p), "/")
+	}
+
+	var targets []string
+
+	if unikernelPath := u.State.Annotations[annotBinary]; unikernelPath != "" {
+		targets = append(targets, filepath.Join(monRootfs, norm(unikernelPath)))
+	}
+	if initrdPath := u.State.Annotations[annotInitrd]; initrdPath != "" {
+		targets = append(targets, filepath.Join(monRootfs, norm(initrdPath)))
+	}
+	targets = append(targets, filepath.Join(monRootfs, uruncJSONFilename))
+
+	for _, t := range targets {
+		if err := unix.Unmount(t, 0); err != nil {
+			if err == unix.EINVAL || err == unix.ENOENT {
+				continue
+			}
+			uniklog.WithError(err).WithField("path", t).Warn("failed to unmount snapshot view bind mount")
+			continue
+		}
+		uniklog.WithField("path", t).Debug("unmounted snapshot view bind mount")
+	}
+}
+
 // Delete removes the containers base directory and its contents
 func (u *Unikontainer) Delete() error {
 	var dirs []string
@@ -616,6 +678,13 @@ func (u *Unikontainer) Delete() error {
 	if !filepath.IsAbs(rootfsDir) {
 		rootfsDir = filepath.Join(bundleDir, rootfsDir)
 	}
+
+	// If we used a shim-managed snapshot view for the container rootfs, ensure
+	// we explicitly unmount the bind mounts created from that view into the
+	// monitor rootfs before the shim attempts to unmount the view and remove
+	// the snapshot device.
+	u.cleanupSnapshotViewBindMounts()
+
 	monRootfs := filepath.Join(bundleDir, monitorRootfsDirName)
 
 	// TODO: We might not need to remove any of the directories and let
