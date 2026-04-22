@@ -28,9 +28,13 @@ var _ = Describe("Nerdctl", Ordered, ContinueOnFailure, func() {
 		err := pullAllImages(testNerdctl, images)
 		Expect(err).NotTo(HaveOccurred(), "Failed to pull nerdctl images")
 
-		DeferCleanup(func() {
-			removeAllImages(testNerdctl, images)
-		})
+		if keepImagesEnabled() {
+			GinkgoLogr.Info("Skipping image cleanup because URUNC_E2E_KEEP_IMAGES is enabled")
+		} else {
+			DeferCleanup(func() {
+				removeAllImages(testNerdctl, images)
+			})
+		}
 	})
 
 	BeforeEach(func() {

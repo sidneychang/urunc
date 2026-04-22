@@ -30,6 +30,7 @@ import (
 const (
 	maxPullRetries = 5
 	pullRetryDelay = 2 * time.Second
+	keepImagesEnv  = "URUNC_E2E_KEEP_IMAGES"
 )
 
 func getTestImages(cases []containerTestArgs) []string {
@@ -47,6 +48,15 @@ func getTestImages(cases []containerTestArgs) []string {
 
 func pullAllImages(testFunc string, images []string) error {
 	for _, image := range images {
+		exists, err := imageExistsForTest(testFunc, image)
+		if err != nil {
+			return fmt.Errorf("failed to check image %s: %w", image, err)
+		}
+		if exists {
+			log.Printf("Image already exists locally, skipping pull: %s", image)
+			continue
+		}
+
 		log.Printf("Pulling image: %s", image)
 		if err := pullImageWithRetry(testFunc, image); err != nil {
 			return fmt.Errorf("failed to pull %s: %w", image, err)
@@ -94,6 +104,40 @@ func pullImageForTest(testFunc string, image string) error {
 	default:
 		return commonPull(ctrName, image)
 	}
+}
+
+func imageExistsForTest(testFunc string, image string) (bool, error) {
+	switch testFunc {
+	case testCrictl:
+		_, err := commonCmdExec(crictlName + " inspecti " + image)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	case testNerdctl:
+		_, err := commonCmdExec(nerdctlName + " image inspect " + image)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	case testDocker:
+		_, err := commonCmdExec(dockerName + " image inspect " + image)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	default:
+		_, err := commonCmdExec(ctrName + " image inspect " + image)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	}
+}
+
+func keepImagesEnabled() bool {
+	val := strings.TrimSpace(strings.ToLower(os.Getenv(keepImagesEnv)))
+	return val == "1" || val == "true" || val == "yes" || val == "y"
 }
 
 func removeImageForTest(testFunc string, image string) error {
