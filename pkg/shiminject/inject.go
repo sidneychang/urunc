@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
@@ -50,11 +51,19 @@ const (
 	sharedViewsLock   = ".lock"
 	sharedViewsCreate = ".creating"
 	sharedViewLeaseID = "urunc-shared-view-"
+	leaseGCExpireKey  = "containerd.io/gc.expire"
 	sharedViewWait    = 10 * time.Millisecond
-	sharedViewTimeout = 5 * time.Second
+
+	defaultSharedViewLeaseTTL = 24 * time.Hour
+	defaultSharedViewTimeout  = 5 * time.Second
+	envSharedViewLeaseTTL     = "URUNC_SHARED_VIEW_LEASE_TTL"
+	envSharedViewTimeout      = "URUNC_SHARED_VIEW_TIMEOUT"
 )
 
 var log = logrus.WithField("subsystem", "shiminject")
+var staleViewsCleanupOnce sync.Once
+var sharedViewLeaseTTL = durationFromEnv(envSharedViewLeaseTTL, defaultSharedViewLeaseTTL)
+var sharedViewTimeout = durationFromEnv(envSharedViewTimeout, defaultSharedViewTimeout)
 
 // SnapshotViewInfo describes the shared snapshot view for a container.
 // Kept in-memory by the shim wrapper; used for cleanup on Delete.
@@ -108,6 +117,31 @@ type containerdClients struct {
 
 func withNamespace(ctx context.Context, ns string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "containerd-namespace", ns)
+}
+
+func withNamespaceAndLease(ctx context.Context, ns, leaseID string) context.Context {
+	ctx = withNamespace(ctx, ns)
+	if leaseID != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "containerd-lease", leaseID)
+	}
+	return ctx
+}
+
+func durationFromEnv(envKey string, def time.Duration) time.Duration {
+	raw := os.Getenv(envKey)
+	if raw == "" {
+		return def
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		log.WithFields(logrus.Fields{
+			"env":     envKey,
+			"value":   raw,
+			"default": def.String(),
+		}).Warn("invalid duration env value, using default")
+		return def
+	}
+	return parsed
 }
 
 func grpcErr(err error) error {
@@ -313,6 +347,71 @@ func waitForSharedViewReady(paths sharedViewPaths) error {
 			return fmt.Errorf("timed out waiting for shared view %s to become ready", paths.dataDir)
 		}
 		time.Sleep(sharedViewWait)
+	}
+}
+
+// cleanupStaleSharedViewsOnce performs a best-effort local cleanup of stale
+// shared-view mountpoints (no active user markers) once per shim process.
+// This complements containerd GC by cleaning local mount state under
+// /run/urunc/shared-views that containerd cannot unmount directly.
+func cleanupStaleSharedViewsOnce() {
+	staleViewsCleanupOnce.Do(func() {
+		entries, err := os.ReadDir(sharedViewsRoot)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.WithError(err).Warn("failed to scan shared views root for stale mounts")
+			}
+			return
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			paths := newSharedViewPaths(entry.Name())
+			cleanupStaleSharedView(paths)
+		}
+	})
+}
+
+func cleanupStaleSharedView(paths sharedViewPaths) {
+	unlock, err := acquireSharedViewLock(paths.lockPath)
+	if err != nil {
+		log.WithError(err).Warn("failed to lock shared view during stale cleanup")
+		return
+	}
+	defer unlock()
+
+	if sharedViewCreateInProgress(paths) {
+		return
+	}
+
+	entries, err := os.ReadDir(paths.usersDir)
+	if err != nil && !os.IsNotExist(err) {
+		log.WithError(err).Warn("failed to read shared view users dir during stale cleanup")
+		return
+	}
+	if len(entries) > 0 {
+		return
+	}
+
+	mounted, err := mountinfo.Mounted(paths.dataDir)
+	if err != nil {
+		log.WithError(err).Warn("failed to check stale shared view mountpoint")
+	}
+	if mounted {
+		if err := mount.Unmount(paths.dataDir, 0); err != nil && !os.IsNotExist(err) {
+			log.WithError(err).Warn("failed to unmount stale shared snapshot view")
+			return
+		}
+	}
+
+	if err := os.RemoveAll(paths.base); err != nil && !os.IsNotExist(err) {
+		log.WithError(err).Warn("failed to remove stale shared view directory")
+		return
+	}
+	if err := os.Remove(paths.lockPath); err != nil && !os.IsNotExist(err) {
+		log.WithError(err).Warn("failed to remove stale shared view lock file")
 	}
 }
 
@@ -639,17 +738,23 @@ func CreateSnapshotView(ctx context.Context, bundle, containerID string) (*Snaps
 	// Ensure a containerd lease exists for this shared view so that GC keeps
 	// the underlying snapshot device alive while any container is using it.
 	leaseID := sharedViewLeaseID + sharedViewID
-	_, err = client.leases.Create(withNamespace(ctx, ns), &leasesapi.CreateRequest{ID: leaseID})
+	_, err = client.leases.Create(withNamespace(ctx, ns), &leasesapi.CreateRequest{
+		ID: leaseID,
+		Labels: map[string]string{
+			leaseGCExpireKey: time.Now().Add(sharedViewLeaseTTL).UTC().Format(time.RFC3339),
+		},
+	})
 	err = grpcErr(err)
 	if err != nil && !errdefs.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("create shared view lease %s: %w", leaseID, err)
 	}
-	ctx = metadata.AppendToOutgoingContext(withNamespace(ctx, ns), "containerd-lease", leaseID)
+	ctx = withNamespaceAndLease(ctx, ns, leaseID)
 
 	// Ensure root directory exists before acquiring the lock file inside it.
 	if err := os.MkdirAll(sharedViewsRoot, 0755); err != nil {
 		return nil, fmt.Errorf("create shared views root %s: %w", sharedViewsRoot, err)
 	}
+	cleanupStaleSharedViewsOnce()
 
 	if err := ensureSharedViewReadyAndRegistered(
 		ctx, client, ns, snapshotter, viewKey, snapshotKey, paths, containerID,
@@ -762,9 +867,11 @@ func removeSharedViewSnapshot(ctx context.Context, info *SnapshotViewInfo) {
 
 	// Attach the shared view lease to the context so snapshot removal is
 	// performed within the same lease that protects the snapshot from GC.
+	leaseID := ""
 	if info.SharedViewID != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, "containerd-lease", sharedViewLeaseID+info.SharedViewID)
+		leaseID = sharedViewLeaseID + info.SharedViewID
 	}
+	ctx = withNamespaceAndLease(ctx, info.Namespace, leaseID)
 
 	client, err := newContainerdClient()
 	if err != nil {
