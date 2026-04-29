@@ -27,12 +27,13 @@ import (
 
 // rootfsSelector encapsulates the context for rootfs selection
 type rootfsSelector struct {
-	bundle     string
-	cntrRootfs string
-	annot      map[string]string
-	unikernel  types.Unikernel
-	vmm        types.VMM
-	vfsdPath   string
+	bundle       string
+	cntrRootfs   string
+	annot        map[string]string
+	artifactRoot string
+	unikernel    types.Unikernel
+	vmm          types.VMM
+	vfsdPath     string
 }
 
 // newRootfsResult creates a RootfsParams with common defaults
@@ -103,14 +104,16 @@ func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
 		return types.RootfsParams{}, false
 	}
 
-	viewMountPath := rs.annot[annotSnapshotViewMountPath]
-	if viewMountPath != "" {
+	if rs.artifactRoot != "" {
 		result := newRootfsResult("block", rootFsDevice.Source, rs.cntrRootfs, rs.cntrRootfs)
-		result.SnapshotViewMountPath = viewMountPath
+		result.BundleDir = rs.bundle
+		result.ArtifactRoot = rs.artifactRoot
 		return result, true
 	}
 
-	return newRootfsResult("block", rootFsDevice.Source, rs.cntrRootfs, rs.cntrRootfs), true
+	result := newRootfsResult("block", rootFsDevice.Source, rs.cntrRootfs, rs.cntrRootfs)
+	result.BundleDir = rs.bundle
+	return result, true
 }
 
 // tryVirtiofs checks if virtiofs can be used
@@ -202,16 +205,17 @@ func switchMonRootfs(res types.RootfsParams, bundle string) (types.RootfsParams,
 //  4. Container rootfs as shared-fs: virtiofs > 9pfs (if MountRootfs=true and supported)
 //  5. No rootfs
 func chooseRootfs(bundle string, cntrRootfs string, annot map[string]string,
-	unikernel types.Unikernel, vmm types.VMM, vfsdPath string) (types.RootfsParams, error) {
+	artifactRoot string, unikernel types.Unikernel, vmm types.VMM, vfsdPath string) (types.RootfsParams, error) {
 	var retErr error
 
 	selector := &rootfsSelector{
-		bundle:     bundle,
-		cntrRootfs: cntrRootfs,
-		annot:      annot,
-		unikernel:  unikernel,
-		vmm:        vmm,
-		vfsdPath:   vfsdPath,
+		bundle:       bundle,
+		cntrRootfs:   cntrRootfs,
+		annot:        annot,
+		artifactRoot: artifactRoot,
+		unikernel:    unikernel,
+		vmm:          vmm,
+		vfsdPath:     vfsdPath,
 	}
 
 	// Priority 1: Initrd

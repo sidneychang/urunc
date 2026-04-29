@@ -19,8 +19,7 @@ import (
 
 	"github.com/containerd/containerd/runtime/v2/runc/manager"
 	"github.com/containerd/containerd/runtime/v2/shim"
-
-	_ "github.com/urunc-dev/urunc/pkg/shimtask"
+	_ "github.com/urunc-dev/urunc/pkg/shimwrap"
 )
 
 func main() {

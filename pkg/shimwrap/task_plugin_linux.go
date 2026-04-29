@@ -17,13 +17,18 @@
    limitations under the License.
 */
 
-package shimtask
+package shimwrap
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/containerd/containerd/pkg/shutdown"
 	"github.com/containerd/containerd/plugin"
 	runcTask "github.com/containerd/containerd/runtime/v2/runc/task"
 	"github.com/containerd/containerd/runtime/v2/shim"
+	"github.com/sirupsen/logrus"
+	"github.com/urunc-dev/urunc/pkg/shimview"
 )
 
 func init() {
@@ -47,7 +52,20 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return &wrapper{TaskService: inner}, nil
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, err
+			}
+			if err := shimview.ReconcileAllSharedViews(ic.Context); err != nil {
+				logrus.WithError(err).Warn("initial shim view reconciliation failed")
+			}
+			return &taskService{
+				TaskService: inner,
+				// The shim starts in a bundle directory under <state-root>/<namespace>/<id>.
+				// Walking up two levels gives us the runtime v2 state root so we can
+				// reconstruct other bundle paths without keeping an in-memory map.
+				stateRoot: filepath.Dir(filepath.Dir(cwd)),
+			}, nil
 		},
 	})
 }

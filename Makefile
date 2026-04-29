@@ -62,8 +62,8 @@ LDFLAGS_OPT      := -s -w
 
 # Source files variables
 #
-# Add all urunc specific go packages as dependency for building
-# or the shimAny change ina go file will result to rebuilding urunc
+# Add urunc runtime packages as dependencies for the urunc binary.
+# Any change in these files should trigger a rebuild of the urunc binary.
 URUNC_SRC      := $(wildcard $(CURDIR)/cmd/urunc/*.go)
 URUNC_SRC      += $(wildcard $(CURDIR)/pkg/unikontainers/*.go)
 URUNC_SRC      += $(wildcard $(CURDIR)/pkg/unikontainers/hypervisors/*.go)
@@ -72,6 +72,10 @@ URUNC_SRC      += $(wildcard $(CURDIR)/pkg/unikontainers/types/*.go)
 URUNC_SRC      += $(wildcard $(CURDIR)/pkg/unikontainers/initrd/*.go)
 URUNC_SRC      += $(wildcard $(CURDIR)/pkg/network/*.go)
 SHIM_SRC       := $(wildcard $(CURDIR)/cmd/containerd-shim-urunc-v2/*.go)
+# Add shim-side view lifecycle and runtime wrapper packages as dependencies
+# for the shim binary so refactors in this area always trigger a rebuild.
+SHIM_SRC       += $(wildcard $(CURDIR)/pkg/shimview/*.go)
+SHIM_SRC       += $(wildcard $(CURDIR)/pkg/shimwrap/*.go)
 
 #? CNTR_TOOL Tool to run the linter container (default: docker)
 CNTR_TOOL ?= docker
@@ -88,10 +92,9 @@ DOCS_CNTR_IMG  ?= harbor.nbfc.io/nubificus/urunc/mkdocs:latest
 
 # Install dependencies variables
 #
-# If we have already built either static or dynamic version of urunc
-# we do not have to rebuild it, but instead we can use whichever
-# version is available to install it. However, the dynamic version
-# has always a preference.
+# If a matching build artifact already exists, reuse it for installation.
+# The current lookup prefers the static artifact first and falls back to the
+# dynamic one when the static binary is absent.
 INSTALL_DEPS   =  $(shell test -e $(URUNC_BIN)_static_$(ARCH) \
                           && echo $(URUNC_BIN)_static_$(ARCH) && exit \
                           || test -e $(URUNC_BIN)_dynamic_$(ARCH) \

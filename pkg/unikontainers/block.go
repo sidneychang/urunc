@@ -16,6 +16,7 @@ package unikontainers
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
+	"github.com/urunc-dev/urunc/pkg/shimview"
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
@@ -81,17 +83,17 @@ func getMountInfo(path string) (types.BlockDevParams, error) {
 	return types.BlockDevParams{}, ErrMountpoint
 }
 
-// bindViewFilesToMonRootfs bind-mounts boot files from the snapshot view into
-// the monitor rootfs without changing permissions on the read-only view.
-func bindViewFilesToMonRootfs(viewMountPath, monRootfs, unikernelPath, initrdPath, uruncJSON string) error {
+// bindBootArtifactsToMonRootfs bind-mounts boot files from an external
+// artifact root into the monitor rootfs without changing source permissions.
+func bindBootArtifactsToMonRootfs(artifactRoot, monRootfs, unikernelPath, initrdPath, uruncJSON string) error {
 	norm := func(p string) string { return strings.TrimPrefix(filepath.Clean(p), "/") }
 	files := []struct{ src, target string }{
-		{filepath.Join(viewMountPath, unikernelPath), norm(unikernelPath)},
-		{filepath.Join(viewMountPath, uruncJSON), norm(uruncJSON)},
+		{filepath.Join(artifactRoot, unikernelPath), norm(unikernelPath)},
+		{filepath.Join(artifactRoot, uruncJSON), norm(uruncJSON)},
 	}
 	if initrdPath != "" {
 		files = append(files, struct{ src, target string }{
-			filepath.Join(viewMountPath, initrdPath), norm(initrdPath),
+			filepath.Join(artifactRoot, initrdPath), norm(initrdPath),
 		})
 	}
 
@@ -196,8 +198,10 @@ func handleExplicitBlockImage(blockImg string, mountPoint string) (types.BlockDe
 }
 
 func handleCntrRootfsAsBlock(rfs types.RootfsParams, unikernelType string, unikernelPath string, uruncJSONFilename string, initrdPath string, mounts []specs.Mount) (types.BlockDevParams, error) {
-	if rfs.SnapshotViewMountPath != "" {
-		if err := bindViewFilesToMonRootfs(rfs.SnapshotViewMountPath, rfs.MonRootfs, unikernelPath, initrdPath, uruncJSONFilename); err != nil {
+	if rfs.ArtifactRoot != "" {
+		if err := shimview.UseSnapshotView(context.Background(), rfs.BundleDir, func(info *shimview.SnapshotViewInfo) error {
+			return bindBootArtifactsToMonRootfs(info.MountPath, rfs.MonRootfs, unikernelPath, initrdPath, uruncJSONFilename)
+		}); err != nil {
 			return types.BlockDevParams{}, err
 		}
 
