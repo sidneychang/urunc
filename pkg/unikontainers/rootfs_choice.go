@@ -104,6 +104,21 @@ func RootfsParamsFromAnnotations(annotations map[string]string) (types.RootfsPar
 	return params, true, nil
 }
 
+// CopyRootfsChoiceAnnotations copies only the shim-generated rootfs choice
+// annotations from src to dst. This keeps the internal handoff separate from
+// image-provided unikernel annotations.
+func CopyRootfsChoiceAnnotations(dst map[string]string, src map[string]string) {
+	if dst == nil || src == nil {
+		return
+	}
+
+	for _, key := range []string{annotRootfsChoiceVersion, annotRootfsChoiceParams} {
+		if val, ok := src[key]; ok {
+			dst[key] = val
+		}
+	}
+}
+
 func (rs *rootfsSelector) tryShimRootfsChoice() (types.RootfsParams, bool) {
 	params, ok, err := RootfsParamsFromAnnotations(rs.annot)
 	if err != nil {
