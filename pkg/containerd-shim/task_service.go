@@ -16,6 +16,7 @@ package containerdshim
 
 import (
 	"context"
+	"errors"
 
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/ttrpc"
@@ -47,6 +48,15 @@ func (s *taskService) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) 
 		}
 	}
 
+	// #684: ChooseRootfs in shim and persist params in bundle before inner task Create.
+	if err := chooseGuestRootfs(r); err != nil {
+		if errors.Is(err, errGuestRootfsChoiceSkipped) {
+			logrus.WithField("container_id", r.ID).Debug("urunc shim: guest rootfs choice skipped")
+			return s.TaskService.Create(ctx, r)
+		}
+		logrus.WithError(err).Warn("urunc shim: failed to choose guest rootfs")
+		return nil, err
+	}
 	return s.TaskService.Create(ctx, r)
 }
 

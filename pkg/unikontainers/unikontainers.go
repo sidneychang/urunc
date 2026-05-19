@@ -231,73 +231,6 @@ func (u *Unikontainer) SetupNet() (types.NetDevParams, error) {
 	return netArgs, nil
 }
 
-// chooseRootfs determines the best rootfs configuration based on available options
-// Priority order:
-//  1. Initrd (if specified)
-//  2. Explicit block device annotation (if mounted at /)
-//  3. Container rootfs as block device (if MountRootfs=true and supported)
-//  4. Container rootfs as shared-fs: virtiofs > 9pfs (if MountRootfs=true and supported)
-//  5. No rootfs
-func (u *Unikontainer) chooseRootfs() (types.RootfsParams, error) {
-	bundleDir := filepath.Clean(u.State.Bundle)
-	rootfsDir := filepath.Clean(u.Spec.Root.Path)
-	rootfsDir, err := resolveAgainstBase(bundleDir, rootfsDir)
-	if err != nil {
-		uniklog.Errorf("could not resolve rootfs directory %s: %v", rootfsDir, err)
-		return types.RootfsParams{}, err
-	}
-
-	unikernelType := u.State.Annotations[annotType]
-	unikernel, err := unikernels.New(unikernelType)
-	if err != nil {
-		return types.RootfsParams{}, err
-	}
-
-	vmmType := u.State.Annotations[annotHypervisor]
-	vmm, err := hypervisors.NewVMM(hypervisors.VmmType(vmmType), u.UruncCfg.Monitors)
-	if err != nil {
-		return types.RootfsParams{}, err
-	}
-
-	virtiofsdConfig := u.UruncCfg.ExtraBins["virtiofsd"]
-
-	selector := &rootfsSelector{
-		bundle:     bundleDir,
-		cntrRootfs: rootfsDir,
-		annot:      u.State.Annotations,
-		unikernel:  unikernel,
-		vmm:        vmm,
-		vfsdPath:   virtiofsdConfig.Path,
-	}
-
-	// Priority 1: Initrd
-	result, ok := selector.tryInitrd()
-	if ok {
-		return result, nil
-	}
-
-	// Priority 2: Explicit block annotation
-	result, ok = selector.tryExplicitBlock()
-	if ok {
-		return result, nil
-	}
-
-	// Priority 3 & 4: Container rootfs (block or shared-fs)
-	result, ok = selector.tryContainerRootfs()
-	if ok {
-		return switchMonRootfs(result, bundleDir)
-	}
-
-	if selector.shouldMountContainerRootfs() {
-		return types.RootfsParams{}, fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
-	}
-
-	uniklog.Info("no rootfs configured for guest")
-	result.MonRootfs = rootfsDir
-
-	return result, nil
-}
-
 // nolint:gocyclo
 func (u *Unikontainer) Exec(metrics m.Writer) error {
 	metrics.Capture(m.TS15)
@@ -426,10 +359,36 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 	// if the respective annotation is set then, depending on the guest
 	// (supports block or 9pfs), it will use the supported option. In case
 	// both ae supported, then the block option will be used by default.
-	rootfsParams, err := u.chooseRootfs()
+	//
+	// Guest rootfs may already be chosen by the urunc shim and stored in the
+	// bundle config.json (com.urunc.internal.rootfs.params). When that annotation
+	// is absent, select here instead (e.g. podman or other runtimes that call urunc
+	// directly). MonRootfs directory creation still happens below in this Exec path.
+	//
+	// Decode from State.Annotations only: the shim writes the internal key to
+	// Spec (config.json), and saveContainerState copies missing Spec keys into
+	// state.json during create/InitialSetup before reexec reaches Exec.
+	rootfsParams, shimPreselected, err := DecodeRootfsParams(u.State.Annotations)
 	if err != nil {
-		uniklog.Errorf("could not choose guest rootfs: %v", err)
-		return err
+		return fmt.Errorf("could not decode shim-provided guest rootfs params: %w", err)
+	}
+	if !shimPreselected {
+		uniklog.Debug("No shim-provided guest rootfs params found; selecting rootfs in runtime")
+		specRoot := ""
+		if u.Spec.Root != nil {
+			specRoot = u.Spec.Root.Path
+		}
+		rootfsParams, err = ChooseRootfs(u.State.Bundle, specRoot, u.State.Annotations, u.UruncCfg, nil)
+		if err != nil {
+			uniklog.Errorf("could not choose guest rootfs: %v", err)
+			return err
+		}
+	} else {
+		uniklog.WithFields(logrus.Fields{
+			"rootfs_type": rootfsParams.Type,
+			"rootfs_path": rootfsParams.Path,
+			"mon_rootfs":  rootfsParams.MonRootfs,
+		}).Info("Using shim-provided guest rootfs params")
 	}
 
 	// TODO: Add support for using both an existing
@@ -476,6 +435,13 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 			monRootfs:            rootfsParams.MonRootfs,
 			annotBlockPath:       u.State.Annotations[annotBlock],
 			annotBlockMountPoint: u.State.Annotations[annotBlockMntPoint],
+		}
+	}
+
+	if rootfsParams.MonRootfs == filepath.Join(bundleDir, monitorRootfsDirName) {
+		err = os.MkdirAll(rootfsParams.MonRootfs, 0o755)
+		if err != nil {
+			return fmt.Errorf("failed to create monitor rootfs directory %s: %w", rootfsParams.MonRootfs, err)
 		}
 	}
 

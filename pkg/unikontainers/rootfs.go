@@ -15,18 +15,26 @@
 package unikontainers
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
+	"github.com/urunc-dev/urunc/pkg/unikontainers/unikernels"
 )
 
 // TODO: Find and set the correct size for the tmpfs in the host
 const tmpfsSizeForNoRootfs = "65536k"
+
+const annotInternalRootfsParams = "com.urunc.internal.rootfs.params"
 
 type rootfsBuilder interface {
 	preSetup() error
@@ -38,12 +46,84 @@ type rootfsBuilder interface {
 
 // rootfsSelector encapsulates the context for rootfs selection
 type rootfsSelector struct {
-	bundle     string
-	cntrRootfs string
-	annot      map[string]string
-	unikernel  types.Unikernel
-	vmm        types.VMM
-	vfsdPath   string
+	cntrRootfs           string
+	annot                map[string]string
+	unikernel            types.Unikernel
+	vmm                  types.VMM
+	vfsdPath             string
+	containerRootfsBlock *types.BlockDevParams
+}
+
+// RootfsMount describes a single rootfs mount from a CreateTask request.
+type RootfsMount struct {
+	Type   string
+	Source string
+}
+
+func resolveBundleRootfs(bundle, specRoot string) (string, error) {
+	return resolveAgainstBase(filepath.Clean(bundle), filepath.Clean(specRoot))
+}
+
+// BlockFromRootfsMounts returns block device parameters when CreateTask supplies
+// a single device-backed rootfs mount supported by the guest unikernel.
+func BlockFromRootfsMounts(mounts []RootfsMount, rootfsDir, unikernelType string) *types.BlockDevParams {
+	if len(mounts) != 1 {
+		return nil
+	}
+
+	m := mounts[0]
+	switch m.Type {
+	case "", "overlay", "tmpfs", "bind":
+		return nil
+	}
+	if !strings.HasPrefix(m.Source, "/dev/") {
+		return nil
+	}
+
+	unikernel, err := unikernels.New(unikernelType)
+	if err != nil || !unikernel.SupportsFS(m.Type) {
+		return nil
+	}
+
+	return &types.BlockDevParams{
+		Source:     m.Source,
+		FsType:     m.Type,
+		MountPoint: rootfsDir,
+	}
+}
+
+// ChooseRootfs selects guest rootfs parameters for a unikernel container from
+// bundle layout and annotations. specRoot may be relative to bundle. rootfsMounts
+// carries CreateTask mounts from the shim; when nil, block backing may be probed
+// from the live container rootfs mount.
+func ChooseRootfs(bundle, specRoot string, annot map[string]string, cfg *UruncConfig, rootfsMounts []RootfsMount) (types.RootfsParams, error) {
+	bundleDir := filepath.Clean(bundle)
+	rootfsDir, err := resolveBundleRootfs(bundleDir, specRoot)
+	if err != nil {
+		uniklog.Errorf("could not resolve rootfs directory %s: %v", rootfsDir, err)
+		return types.RootfsParams{}, err
+	}
+
+	var containerRootfsBlock *types.BlockDevParams
+	if len(rootfsMounts) > 0 {
+		containerRootfsBlock = BlockFromRootfsMounts(rootfsMounts, rootfsDir, annot[annotType])
+	}
+	if containerRootfsBlock == nil && shouldMountContainerRootfs(annot) {
+		unikernelPreview, err := unikernels.New(annot[annotType])
+		if err != nil {
+			return types.RootfsParams{}, err
+		}
+		if unikernelPreview.SupportsBlock() {
+			rootFsDevice, err := getMountInfo(rootfsDir)
+			if err == nil {
+				containerRootfsBlock = &rootFsDevice
+			} else if !errors.Is(err, ErrMountpoint) {
+				uniklog.Errorf("failed to get container's rootfs mount info: %v", err)
+			}
+		}
+	}
+
+	return selectRootfs(bundleDir, rootfsDir, annot, cfg, containerRootfsBlock)
 }
 
 type noRootfs struct {
@@ -131,7 +211,11 @@ func (rs *rootfsSelector) tryExplicitBlock() (types.RootfsParams, bool) {
 // shouldMountContainerRootfs checks if container rootfs should be mounted
 // based on the respective annotation
 func (rs *rootfsSelector) shouldMountContainerRootfs() bool {
-	annotValue := rs.annot[annotMountRootfs]
+	return shouldMountContainerRootfs(rs.annot)
+}
+
+func shouldMountContainerRootfs(annot map[string]string) bool {
+	annotValue := annot[annotMountRootfs]
 	if annotValue == "" {
 		return false
 	}
@@ -152,12 +236,11 @@ func (rs *rootfsSelector) tryContainerBlockRootfs() (types.RootfsParams, bool) {
 		return types.RootfsParams{}, false
 	}
 
-	rootFsDevice, err := getMountInfo(rs.cntrRootfs)
-	if err != nil {
-		uniklog.Errorf("failed to get container's rootfs mount info: %v", err)
+	if rs.containerRootfsBlock == nil {
 		return types.RootfsParams{}, false
 	}
 
+	rootFsDevice := *rs.containerRootfsBlock
 	if !rs.unikernel.SupportsFS(rootFsDevice.FsType) {
 		return types.RootfsParams{}, false
 	}
@@ -235,15 +318,109 @@ func (rs *rootfsSelector) tryContainerRootfs() (types.RootfsParams, bool) {
 	return types.RootfsParams{}, false
 }
 
-func switchMonRootfs(res types.RootfsParams, bundle string) (types.RootfsParams, error) {
-	monRootfs := filepath.Join(bundle, monitorRootfsDirName)
-	err := os.MkdirAll(monRootfs, 0o755)
-	if err != nil {
-		return types.RootfsParams{}, fmt.Errorf("failed to create monitor rootfs directory %s: %w", monRootfs, err)
-	}
-	res.MonRootfs = monRootfs
+// switchMonRootfs records where the monitor process rootfs will live under the
+// bundle. It does not create or mount that directory; prepareMonRootfs does that
+// later during runtime Exec.
+func switchMonRootfs(res types.RootfsParams, bundle string) types.RootfsParams {
+	res.MonRootfs = filepath.Join(bundle, monitorRootfsDirName)
+	return res
+}
 
-	return res, nil
+// selectRootfs determines the guest rootfs without creating, mounting, or copying
+// any files. bundle and cntrRootfs must already be resolved absolute paths.
+func selectRootfs(bundle, cntrRootfs string, annot map[string]string, cfg *UruncConfig, containerRootfsBlock *types.BlockDevParams) (types.RootfsParams, error) {
+	if cfg == nil {
+		return types.RootfsParams{}, fmt.Errorf("urunc config is required for guest rootfs selection")
+	}
+
+	unikernel, err := unikernels.New(annot[annotType])
+	if err != nil {
+		return types.RootfsParams{}, err
+	}
+
+	vmm, err := hypervisors.NewVMM(hypervisors.VmmType(annot[annotHypervisor]), cfg.Monitors)
+	if err != nil {
+		return types.RootfsParams{}, err
+	}
+
+	vfsdPath := ""
+	if bin, ok := cfg.ExtraBins["virtiofsd"]; ok {
+		vfsdPath = bin.Path
+	}
+
+	selector := &rootfsSelector{
+		cntrRootfs:           cntrRootfs,
+		annot:                annot,
+		unikernel:            unikernel,
+		vmm:                  vmm,
+		vfsdPath:             vfsdPath,
+		containerRootfsBlock: containerRootfsBlock,
+	}
+
+	result, ok := selector.tryInitrd()
+	if ok {
+		return result, nil
+	}
+
+	result, ok = selector.tryExplicitBlock()
+	if ok {
+		return result, nil
+	}
+
+	result, ok = selector.tryContainerRootfs()
+	if ok {
+		return switchMonRootfs(result, bundle), nil
+	}
+
+	if selector.shouldMountContainerRootfs() {
+		return types.RootfsParams{}, fmt.Errorf("can not use the container rootfs as the sandbox's guest rootfs through block or shared-fs")
+	}
+
+	uniklog.Info("no rootfs configured for guest")
+	result.MonRootfs = cntrRootfs
+
+	return result, nil
+}
+
+// RootfsParamsAnnotation returns the internal annotation key used to hand
+// shim-selected rootfs parameters to the runtime.
+func RootfsParamsAnnotation() string {
+	return annotInternalRootfsParams
+}
+
+// EncodeRootfsParams serializes rootfs parameters for storage in an OCI
+// annotation.
+func EncodeRootfsParams(rootfs types.RootfsParams) (string, error) {
+	data, err := json.Marshal(rootfs)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// DecodeRootfsParams reads rootfs parameters from OCI annotations. The bool
+// return value reports whether the internal annotation was present.
+func DecodeRootfsParams(annotations map[string]string) (types.RootfsParams, bool, error) {
+	encoded := annotations[annotInternalRootfsParams]
+	if encoded == "" {
+		return types.RootfsParams{}, false, nil
+	}
+
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return types.RootfsParams{}, true, err
+	}
+
+	var rootfs types.RootfsParams
+	if err := json.Unmarshal(data, &rootfs); err != nil {
+		return types.RootfsParams{}, true, err
+	}
+
+	if rootfs.MonRootfs == "" {
+		return types.RootfsParams{}, true, fmt.Errorf("rootfs params annotation is missing monitor rootfs")
+	}
+
+	return rootfs, true, nil
 }
 
 // pivotRootfs changes rootfs with pivot

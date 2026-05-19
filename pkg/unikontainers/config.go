@@ -116,6 +116,21 @@ func GetUnikernelConfig(bundleDir string, spec *specs.Spec) (*UnikernelConfig, e
 	return jsonConf, nil
 }
 
+// GetUnikernelConfigFromSpecAnnotations retrieves urunc configuration only
+// from OCI spec annotations. Unlike GetUnikernelConfig, it does not fall back
+// to files inside the container rootfs, so it is safe to call from the shim
+// before containerd mounts the task rootfs.
+func GetUnikernelConfigFromSpecAnnotations(spec *specs.Spec) (*UnikernelConfig, error) {
+	conf := getConfigFromSpec(spec)
+	if err := conf.validate(); err != nil {
+		return nil, err
+	}
+	if err := conf.decode(); err != nil {
+		return nil, err
+	}
+	return conf, nil
+}
+
 // getConfigFromSpec retrieves the urunc specific annotations from the spec and populates the Unikernel config.
 func getConfigFromSpec(spec *specs.Spec) *UnikernelConfig {
 	unikernelType := spec.Annotations[annotType]
