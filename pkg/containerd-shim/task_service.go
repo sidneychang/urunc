@@ -19,6 +19,8 @@ import (
 
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v2"
 	"github.com/containerd/ttrpc"
+	"github.com/sirupsen/logrus"
+	shimcontainerd "github.com/urunc-dev/urunc/pkg/containerd-shim/containerd"
 )
 
 // taskService is urunc's shim-side wrapper around containerd's runc task
@@ -31,6 +33,20 @@ type taskService struct {
 }
 
 func (s *taskService) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*taskAPI.CreateTaskResponse, error) {
+	session, err := shimcontainerd.OpenSession(ctx, s.containerdAddress, r.ID)
+	if err != nil {
+		logrus.WithError(err).WithField("container_id", r.ID).Warn("urunc shim: failed to open containerd session")
+	} else {
+		defer session.Close()
+	}
+
+	// #565: merge image metadata into bundle config.json when spec lacks urunc keys.
+	if session != nil {
+		if err := s.injectMissingAnnotations(ctx, r, session); err != nil {
+			logrus.WithError(err).WithField("container_id", r.ID).Warn("urunc shim: failed to inject missing annotations")
+		}
+	}
+
 	return s.TaskService.Create(ctx, r)
 }
 
