@@ -25,6 +25,7 @@ import (
 	containerdTypes "github.com/containerd/containerd/api/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	shimcontainerd "github.com/urunc-dev/urunc/pkg/containerd-shim/containerd"
 	"github.com/urunc-dev/urunc/pkg/unikontainers"
 )
 
@@ -32,10 +33,10 @@ var errGuestRootfsChoiceSkipped = errors.New("guest rootfs choice skipped")
 
 // chooseGuestRootfs selects guest rootfs parameters before inner task Create and
 // persists them in the bundle OCI spec for runtime Exec to consume.
-func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) error {
+func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) (shimcontainerd.GuestRootfsChoice, error) {
 	spec, mode, err := loadSpec(r.Bundle)
 	if err != nil {
-		return err
+		return shimcontainerd.GuestRootfsChoice{}, err
 	}
 	log := logrus.WithFields(logrus.Fields{
 		"container_id": r.ID,
@@ -44,7 +45,7 @@ func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) error {
 
 	config, err := unikontainers.GetUnikernelConfigFromSpecAnnotations(spec)
 	if err != nil {
-		return errGuestRootfsChoiceSkipped
+		return shimcontainerd.GuestRootfsChoice{}, errGuestRootfsChoiceSkipped
 	}
 
 	annotations := config.Map()
@@ -55,12 +56,12 @@ func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) error {
 
 	rootfsParams, err := unikontainers.ChooseRootfs(filepath.Clean(r.Bundle), spec.Root.Path, annotations, uruncCfg, rootfsMountsFromCreateTask(r.Rootfs))
 	if err != nil {
-		return err
+		return shimcontainerd.GuestRootfsChoice{}, err
 	}
 
 	encoded, err := unikontainers.EncodeRootfsParams(rootfsParams)
 	if err != nil {
-		return err
+		return shimcontainerd.GuestRootfsChoice{}, err
 	}
 	if spec.Annotations == nil {
 		spec.Annotations = make(map[string]string)
@@ -72,7 +73,13 @@ func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) error {
 		"mon_rootfs":  rootfsParams.MonRootfs,
 	}).Info("urunc shim: wrote guest rootfs choice to bundle")
 
-	return saveSpec(r.Bundle, spec, mode)
+	if err := saveSpec(r.Bundle, spec, mode); err != nil {
+		return shimcontainerd.GuestRootfsChoice{}, err
+	}
+	return shimcontainerd.GuestRootfsChoice{
+		Params: rootfsParams,
+		Chosen: true,
+	}, nil
 }
 
 func rootfsMountsFromCreateTask(rootfs []*containerdTypes.Mount) []unikontainers.RootfsMount {
@@ -91,8 +98,8 @@ func rootfsMountsFromCreateTask(rootfs []*containerdTypes.Mount) []unikontainers
 
 // loadSpec reads the OCI runtime spec (config.json) from the task bundle at CreateTask time.
 // Callers need the full spec on disk (root path, annotations read/write); the CreateTask RPC does
-// not include the OCI document. injectMissingAnnotations runs before chooseGuestRootfs
-// in taskService.Create.
+// not include the OCI document. injectMissingAnnotations runs before chooseGuestRootfs;
+// snapshot view preparation runs after chooseGuestRootfs in taskService.Create.
 func loadSpec(bundle string) (*specs.Spec, os.FileMode, error) {
 	configPath := filepath.Join(bundle, "config.json")
 	info, err := os.Stat(configPath)

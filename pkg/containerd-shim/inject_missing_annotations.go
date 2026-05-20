@@ -52,7 +52,8 @@ func (s *taskService) injectMissingAnnotations(ctx context.Context, r *taskAPI.C
 		spec.Annotations = make(map[string]string)
 	}
 
-	imageAnnots, err := session.ImageAnnotations(ctx, uruncAnnotationPrefix)
+	imageReader := shimcontainerd.NewImageAnnotationReader(session)
+	imageAnnots, err := imageReader.Annotations(ctx, uruncAnnotationPrefix)
 	if err != nil {
 		return err
 	}

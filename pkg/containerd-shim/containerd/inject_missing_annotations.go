@@ -30,32 +30,52 @@ import (
 	imageSpec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-// ImageAnnotations returns image config labels and manifest annotations with
-// the provided prefix. Manifest annotations take precedence over config labels.
-func (s *Session) ImageAnnotations(ctx context.Context, prefix string) (map[string]string, error) {
-	imageRef := s.container.GetImage()
-	if imageRef == "" {
-		return nil, fmt.Errorf("container %q has empty image ref", s.containerID)
-	}
-
-	imageResp, err := s.imagesClient().Get(withNamespace(ctx, s.namespace), &imagesapi.GetImageRequest{Name: imageRef})
-	if err != nil {
-		return nil, fmt.Errorf("get image %s: %w", imageRef, containerdErr(err))
-	}
-
-	return s.imageAnnotations(ctx, imageResp.Image.Target, prefix)
+// ImageAnnotationReader holds the containerd resources needed to read urunc
+// annotations from image metadata.
+type ImageAnnotationReader struct {
+	namespace     string
+	containerID   string
+	imageRef      string
+	imagesClient  imagesapi.ImagesClient
+	contentClient contentapi.ContentClient
 }
 
-func (s *Session) imageAnnotations(ctx context.Context, target *types.Descriptor, prefix string) (map[string]string, error) {
-	ctx = withNamespace(ctx, s.namespace)
-	contentClient := s.contentClient()
+// NewImageAnnotationReader creates an image metadata reader from a containerd
+// session. The returned reader contains only the resources needed for annotation
+// lookup.
+func NewImageAnnotationReader(s *Session) *ImageAnnotationReader {
+	return &ImageAnnotationReader{
+		namespace:     s.namespace,
+		containerID:   s.containerID,
+		imageRef:      s.container.GetImage(),
+		imagesClient:  s.imagesClient(),
+		contentClient: s.contentClient(),
+	}
+}
 
-	manifestDesc, err := manifestDescriptor(ctx, contentClient, target)
+// Annotations returns image config labels and manifest annotations with the
+// provided prefix. Manifest annotations take precedence over config labels.
+func (r *ImageAnnotationReader) Annotations(ctx context.Context, prefix string) (map[string]string, error) {
+	if r.imageRef == "" {
+		return nil, fmt.Errorf("container %q has empty image ref", r.containerID)
+	}
+
+	imageResp, err := r.imagesClient.Get(withNamespace(ctx, r.namespace), &imagesapi.GetImageRequest{Name: r.imageRef})
+	if err != nil {
+		return nil, fmt.Errorf("get image %s: %w", r.imageRef, containerdErr(err))
+	}
+
+	return r.annotations(ctx, imageResp.Image.Target, prefix)
+}
+
+func (r *ImageAnnotationReader) annotations(ctx context.Context, target *types.Descriptor, prefix string) (map[string]string, error) {
+	ctx = withNamespace(ctx, r.namespace)
+	manifestDesc, err := manifestDescriptor(ctx, r.contentClient, target)
 	if err != nil {
 		return nil, err
 	}
 
-	manifestRaw, err := readBlob(ctx, contentClient, manifestDesc.Digest, manifestDesc.Size)
+	manifestRaw, err := readBlob(ctx, r.contentClient, manifestDesc.Digest, manifestDesc.Size)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest blob: %w", err)
 	}
@@ -64,7 +84,7 @@ func (s *Session) imageAnnotations(ctx context.Context, target *types.Descriptor
 		return nil, fmt.Errorf("unmarshal manifest: %w", err)
 	}
 
-	configRaw, err := readBlob(ctx, contentClient, manifest.Config.Digest.String(), manifest.Config.Size)
+	configRaw, err := readBlob(ctx, r.contentClient, manifest.Config.Digest.String(), manifest.Config.Size)
 	if err != nil {
 		return nil, fmt.Errorf("read image config blob: %w", err)
 	}
