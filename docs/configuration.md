@@ -38,6 +38,9 @@ default_vcpus = 1
 [extra_binaries.virtiofsd]
 path = "/usr/libexec/virtiofsd"
 options = "--sandbox none"
+
+[snapshot_view]
+enabled = false
 ```
 
 ## Configuration Sections
@@ -88,6 +91,37 @@ destination = "/tmp/urunc-timestamps.log"
 ```
 
 When enabled, `urunc` will log performance timestamps to help with debugging and optimization.
+
+### Snapshot View Configuration
+
+The `[snapshot_view]` section controls whether the urunc shim prepares a
+per-container containerd snapshot view at task Create (for `devmapper` /
+`blockfile` snapshotters). This is a **host-level** setting in
+`/etc/urunc/config.toml`, not an OCI bundle annotation.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Prepare snapshot views for container block rootfs at shim Create |
+
+When `enabled = true`, the shim runs `ChooseRootfs` first, then prepares a view
+only if **all** of the following hold:
+
+1. The container snapshotter is block-based (`devmapper` or `blockfile`).
+2. Shim `ChooseRootfs` selected **container block rootfs** (`type=block` with a
+   non-empty `MountedPath`), **or** `ChooseRootfs` was skipped and
+   `com.urunc.unikernel.mountRootfs=true` remains in bundle `config.json` (runtime
+   will select rootfs).
+
+This matches the block-rootfs boot-artifact path: kernel/initrd are read from a
+read-only view instead of being copied out of the container rootfs before attach.
+`com.urunc.unikernel.snapshotView` is not used for this gate.
+
+**Example:**
+
+```toml
+[snapshot_view]
+enabled = true
+```
 
 ### Monitor Configuration
 
