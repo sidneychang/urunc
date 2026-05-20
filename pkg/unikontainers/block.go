@@ -36,15 +36,18 @@ const tmpfsSizeForBlockRootfs = "65536k"
 var ErrMountpoint = errors.New("no FS is mounted in this mountpoint")
 
 type blockRootfs struct {
-	mounts        []specs.Mount
-	monRootfs     string
-	mountedPath   string
-	path          string
-	kernelPath    string
-	initrdPath    string
-	uruncJSONPath string
-	guestType     string
-	guest         types.Unikernel
+	mounts            []specs.Mount
+	monRootfs         string
+	mountedPath       string
+	path              string
+	kernelPath        string
+	initrdPath        string
+	uruncJSONPath     string
+	guestType         string
+	guest             types.Unikernel
+	bundleDir         string
+	// snapshotViewBoot: bundle has a shim-prepared view; boot files are bound after prepareRoot.
+	snapshotViewBoot bool
 }
 
 // getMountInfo determines whether the provided path is a mount point
@@ -125,8 +128,9 @@ func getMountInfo(path string) (types.BlockDevParams, error) {
 // FIXME: This approach fills up /run with unikernel binaries, initrds and urunc.json
 // files for each unikernel we run
 func extractBootFiles(rootfsPath string, newRootfsPath string, unikernel string, uruncJSON string, initrd string) error {
-	currentUnikernelPath := filepath.Join(rootfsPath, unikernel)
-	targetUnikernelPath := filepath.Join(newRootfsPath, unikernel)
+	unikRel := snapshotViewRelPath(unikernel)
+	currentUnikernelPath := filepath.Join(rootfsPath, unikRel)
+	targetUnikernelPath := filepath.Join(newRootfsPath, unikRel)
 	targetUnikernelDir, _ := filepath.Split(targetUnikernelPath)
 	err := moveFile(currentUnikernelPath, targetUnikernelDir)
 	if err != nil {
@@ -134,8 +138,9 @@ func extractBootFiles(rootfsPath string, newRootfsPath string, unikernel string,
 	}
 
 	if initrd != "" {
-		currentInitrdPath := filepath.Join(rootfsPath, initrd)
-		targetInitrdPath := filepath.Join(newRootfsPath, initrd)
+		initrdRel := snapshotViewRelPath(initrd)
+		currentInitrdPath := filepath.Join(rootfsPath, initrdRel)
+		targetInitrdPath := filepath.Join(newRootfsPath, initrdRel)
 		targetInitrdDir, _ := filepath.Split(targetInitrdPath)
 		err = moveFile(currentInitrdPath, targetInitrdDir)
 		if err != nil {
@@ -143,12 +148,11 @@ func extractBootFiles(rootfsPath string, newRootfsPath string, unikernel string,
 		}
 	}
 
-	currentConfigPath := filepath.Join(rootfsPath, uruncJSON)
+	currentConfigPath := filepath.Join(rootfsPath, snapshotViewRelPath(uruncJSON))
 	err = moveFile(currentConfigPath, newRootfsPath)
 	if err != nil {
 		return fmt.Errorf("could not move %s to %s: %w", currentConfigPath, newRootfsPath, err)
 	}
-
 	return nil
 }
 
@@ -226,27 +230,62 @@ func getBlockVolumes(monRootfs string, mounts []specs.Mount, ukernel types.Unike
 }
 
 func (b blockRootfs) preSetup() error {
+	// Preserve main's propagation fix: consume boot artifacts and unmount the
+	// container rootfs before prepareRoot() makes the mount tree private/slave.
 	if b.mountedPath == "" {
 		return nil
 	}
 
-	err := copyMountfiles(b.mountedPath, b.mounts)
-	if err != nil {
+	b.bundleDir = filepath.Dir(b.monRootfs)
+	b.snapshotViewBoot = snapshotViewPreparedInBundle(b.bundleDir)
+
+	if b.snapshotViewBoot {
+		// Placeholder bind before prepareRoot(); setupBootArtifactsAfterPrepareRoot
+		// re-binds onto the post-prepareRoot mount tree visible after chroot.
+		useView, err := prepareSnapshotViewBootBinds(b.bundleDir, b.monRootfs, b.kernelPath, b.initrdPath, b.uruncJSONPath)
+		if err != nil {
+			return err
+		}
+		if !useView {
+			b.snapshotViewBoot = false
+		}
+	}
+
+	if !b.snapshotViewBoot {
+		// FIXME: This approach fills up /run with unikernel binaries and
+		// urunc.json files for each unikernel instance we run
+		err := extractBootFiles(b.mountedPath, b.monRootfs, b.kernelPath, b.uruncJSONPath, b.initrdPath)
+		if err != nil {
+			return fmt.Errorf("failed to extract boot files from rootfs: %w", err)
+		}
+	}
+
+	if err := copyMountfiles(b.mountedPath, b.mounts); err != nil {
 		return fmt.Errorf("failed to copy files from mount list: %w", err)
 	}
 
-	// FIXME: This approach fills up /run with unikernel binaries and
-	// urunc.json files for each unikernel instance we run
-	err = extractBootFiles(b.mountedPath, b.monRootfs, b.kernelPath, b.uruncJSONPath, b.initrdPath)
-	if err != nil {
-		return fmt.Errorf("failed to extract boot files from rootfs: %w", err)
-	}
-
-	err = mount.Unmount(b.mountedPath)
-	if err != nil {
+	if err := mount.Unmount(b.mountedPath); err != nil {
 		return fmt.Errorf("failed to unmount rootfs: %w", err)
 	}
 
+	return nil
+}
+
+// rebindSnapshotViewBootAfterPrepareRoot re-binds kernel/urunc.json from the shim
+// snapshot view onto monRootfs after prepareRoot(). The first bind in preSetup is
+// not enough: prepareRoot()'s bind mount replaces the mount tree qemu sees after chroot.
+func (b blockRootfs) rebindSnapshotViewBootAfterPrepareRoot() error {
+	if !b.snapshotViewBoot {
+		return nil
+	}
+
+	useView, err := prepareSnapshotViewBootBinds(b.bundleDir, b.monRootfs, b.kernelPath, b.initrdPath, b.uruncJSONPath)
+	if err != nil {
+		return err
+	}
+	if !useView {
+		return fmt.Errorf("snapshot view boot artifact bind failed after prepareRoot (container rootfs already unmounted)")
+	}
 	return nil
 }
 

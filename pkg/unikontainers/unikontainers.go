@@ -471,6 +471,7 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 			uruncJSONPath: uruncJSONFilename,
 			guestType:     unikernelType,
 			guest:         unikernel,
+			bundleDir:     bundleDir,
 		}
 	case "initrd":
 		rfsBuilder = initrdRootfs{
@@ -515,6 +516,13 @@ func (u *Unikontainer) Exec(metrics m.Writer) error {
 	err = prepareRoot(rootfsParams.MonRootfs, u.Spec.Linux.RootfsPropagation)
 	if err != nil {
 		return err
+	}
+
+	// Snapshot view boot binds are block-only: re-bind after prepareRoot(), before qemu.
+	if b, ok := rfsBuilder.(blockRootfs); ok {
+		if err := b.rebindSnapshotViewBootAfterPrepareRoot(); err != nil {
+			return fmt.Errorf("boot artifact setup after prepareRoot failed: %w", err)
+		}
 	}
 
 	// Setup the rootfs for the monitor execution, creating necessary
@@ -741,6 +749,8 @@ func (u *Unikontainer) Delete() error {
 	var dirs []string
 	var prefPath string
 
+	bundleDir := filepath.Clean(u.State.Bundle)
+
 	if u.isRunning() {
 		return fmt.Errorf("cannot delete running container: %s", u.State.ID)
 	}
@@ -753,7 +763,6 @@ func (u *Unikontainer) Delete() error {
 	}
 
 	// Make sure paths are clean
-	bundleDir := filepath.Clean(u.State.Bundle)
 	rootfsDir := filepath.Clean(u.Spec.Root.Path)
 	if !filepath.IsAbs(rootfsDir) {
 		rootfsDir = filepath.Join(bundleDir, rootfsDir)
