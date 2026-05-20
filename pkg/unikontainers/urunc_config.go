@@ -34,11 +34,17 @@ type UruncTimestamps struct {
 	Destination string `toml:"destination"` // Used to specify a file for timestamps
 }
 
+// UruncSnapshotView configures shim-side per-container snapshot views (devmapper/blockfile).
+type UruncSnapshotView struct {
+	Enabled bool `toml:"enabled"`
+}
+
 type UruncConfig struct {
-	Log        UruncLog                        `toml:"log"`
-	Timestamps UruncTimestamps                 `toml:"timestamps"`
-	Monitors   map[string]types.MonitorConfig  `toml:"monitors"`
-	ExtraBins  map[string]types.ExtraBinConfig `toml:"extra_binaries"`
+	Log          UruncLog                        `toml:"log"`
+	Timestamps   UruncTimestamps                 `toml:"timestamps"`
+	SnapshotView UruncSnapshotView               `toml:"snapshot_view"`
+	Monitors     map[string]types.MonitorConfig  `toml:"monitors"`
+	ExtraBins    map[string]types.ExtraBinConfig `toml:"extra_binaries"`
 }
 
 // this struct is used to parse only the log and timestamp section of the urunc config file
@@ -94,12 +100,17 @@ func defaultExtraBinConfig() map[string]types.ExtraBinConfig {
 	}
 }
 
+func defaultSnapshotViewConfig() UruncSnapshotView {
+	return UruncSnapshotView{Enabled: false}
+}
+
 func defaultUruncConfig() *UruncConfig {
 	return &UruncConfig{
-		Log:        defaultLogConfig(),
-		Timestamps: defaultTimestampsConfig(),
-		Monitors:   defaultMonitorsConfig(),
-		ExtraBins:  defaultExtraBinConfig(),
+		Log:          defaultLogConfig(),
+		Timestamps:   defaultTimestampsConfig(),
+		SnapshotView: defaultSnapshotViewConfig(),
+		Monitors:     defaultMonitorsConfig(),
+		ExtraBins:    defaultExtraBinConfig(),
 	}
 }
 
