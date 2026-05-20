@@ -17,20 +17,27 @@ package containerdshim
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v2"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	containerdShim "github.com/urunc-dev/urunc/pkg/containerd-shim/containerd"
 )
 
 // taskService is urunc's shim-side wrapper around containerd's runc task
-// service. It wires urunc task setup before forwarding calls to the wrapped
-// service.
+// service. It wires annotation injection, guest rootfs precompute, and optional
+// per-container snapshot views at task Create/Delete boundaries.
 type taskService struct {
 	taskAPI.TaskService
 
 	containerdAddress string
+	// stateRoot is the containerd runtime v2 state directory (parent of
+	// per-namespace dirs). Derived at plugin init from the shim cwd; used to
+	// resolve bundle paths on Delete when cwd may no longer be the bundle.
+	stateRoot string
 }
 
 func (s *taskService) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*taskAPI.CreateTaskResponse, error) {
@@ -55,7 +62,8 @@ func (s *taskService) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) 
 
 	// ChooseRootfs after inner task Create so bundle rootfs is mounted;
 	// params are persisted in bundle config.json for runtime Exec.
-	if err := chooseGuestRootfs(r); err != nil {
+	rootfsChoice, err := chooseGuestRootfs(r)
+	if err != nil {
 		if errors.Is(err, errGuestRootfsChoiceSkipped) {
 			log.G(ctx).WithError(err).Debug("urunc(shim): guest rootfs choice skipped")
 			return resp, nil
@@ -64,14 +72,103 @@ func (s *taskService) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) 
 		return nil, err
 	}
 
+	if session != nil {
+		snapshotViewAccessor := containerdShim.NewSnapshotViewAccessor(session)
+		if snapshotViewAccessor.ShouldPrepare(rootfsChoice) {
+			if err := snapshotViewAccessor.Prepare(ctx, r.Bundle); err != nil {
+				log.G(ctx).WithError(err).Warn("urunc(shim): failed to prepare snapshot view; falling back to legacy boot artifact extraction")
+			}
+		}
+	}
+
 	return resp, nil
 }
 
 func (s *taskService) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAPI.DeleteResponse, error) {
-	return s.TaskService.Delete(ctx, r)
+	cleanupSnapshotView := s.snapshotViewCleanupAfterDelete(ctx, r)
+
+	var session *containerdShim.Session
+	if cleanupSnapshotView != nil {
+		var err error
+		session, err = containerdShim.OpenSession(ctx, s.containerdAddress, r.ID)
+		if err != nil {
+			log.G(ctx).WithError(err).Warn("urunc(shim): open containerd session for snapshot view cleanup failed")
+			cleanupSnapshotView = nil
+		} else {
+			defer func() {
+				if err := session.Close(); err != nil {
+					log.G(ctx).WithError(err).Warn("urunc(shim): failed to close containerd session")
+				}
+			}()
+		}
+	}
+
+	resp, err := s.TaskService.Delete(ctx, r)
+
+	var cleanupErr error
+	if cleanupSnapshotView != nil && session != nil {
+		cleanupErr = cleanupSnapshotView(ctx, session)
+	}
+
+	if err != nil {
+		if cleanupErr != nil {
+			log.G(ctx).WithError(cleanupErr).Warn("urunc(shim): snapshot view cleanup also failed after failed Delete")
+		}
+		return resp, err
+	}
+	if cleanupErr != nil {
+		return resp, cleanupErr
+	}
+	return resp, nil
 }
 
 func (s *taskService) RegisterTTRPC(server *ttrpc.Server) error {
 	taskAPI.RegisterTaskService(server, s)
 	return nil
+}
+
+func (s *taskService) bundlePathFor(ctx context.Context, containerID string) (string, error) {
+	if s.stateRoot == "" {
+		return "", fmt.Errorf("task service state root is empty (shim cwd layout assumption violated)")
+	}
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return "", fmt.Errorf("namespace required: %w", err)
+	}
+	return filepath.Join(s.stateRoot, ns, containerID), nil
+}
+
+// snapshotViewCleanupAfterDelete loads bundle cleanup state before inner Delete
+// and returns a callback to run after inner Delete. The callback expects an open
+// containerd session owned by Delete.
+func (s *taskService) snapshotViewCleanupAfterDelete(ctx context.Context, r *taskAPI.DeleteRequest) func(context.Context, *containerdShim.Session) error {
+	if r.ExecID != "" {
+		return nil
+	}
+
+	bundle, err := s.bundlePathFor(ctx, r.ID)
+	if err != nil {
+		log.G(ctx).WithError(err).Warn("urunc(shim): resolve bundle path during Delete failed")
+		return func(context.Context, *containerdShim.Session) error { return err }
+	}
+
+	state, err := (&containerdShim.SnapshotViewAccessor{}).LoadCleanupState(bundle)
+	if err != nil {
+		if !errors.Is(err, containerdShim.ErrSnapshotViewNotPrepared) {
+			log.G(ctx).WithError(err).Warn("urunc(shim): load snapshot view cleanup state during Delete failed")
+		}
+		if errors.Is(err, containerdShim.ErrSnapshotViewNotPrepared) {
+			return nil
+		}
+		return func(context.Context, *containerdShim.Session) error { return err }
+	}
+
+	return func(ctx context.Context, session *containerdShim.Session) error {
+		snapshotViewAccessor := containerdShim.NewSnapshotViewAccessor(session)
+		if err := snapshotViewAccessor.CleanupLoaded(ctx, bundle, state); err != nil {
+			log.G(ctx).WithError(err).Warn("urunc(shim): delete snapshot view during Delete failed")
+			return err
+		}
+		return nil
+	}
 }
