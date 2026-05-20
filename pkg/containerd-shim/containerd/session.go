@@ -150,22 +150,18 @@ func (s *Session) containersClient() containersapi.ContainersClient {
 	return containersapi.NewContainersClient(s.conn)
 }
 
-//nolint:unused // Used by follow-up feature-specific access constructors.
 func (s *Session) imagesClient() imagesapi.ImagesClient {
 	return imagesapi.NewImagesClient(s.conn)
 }
 
-//nolint:unused // Used by follow-up feature-specific access constructors.
 func (s *Session) contentClient() contentapi.ContentClient {
 	return contentapi.NewContentClient(s.conn)
 }
 
-//nolint:unused // Used by follow-up feature-specific access constructors.
 func (s *Session) snapshotsClient() snapshotsapi.SnapshotsClient {
 	return snapshotsapi.NewSnapshotsClient(s.conn)
 }
 
-//nolint:unused // Used by follow-up feature-specific access constructors.
 func (s *Session) leasesClient() leasesapi.LeasesClient {
 	return leasesapi.NewLeasesClient(s.conn)
 }
