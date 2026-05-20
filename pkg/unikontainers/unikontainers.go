@@ -701,6 +701,10 @@ func (u *Unikontainer) Delete() error {
 	}
 	monRootfs := filepath.Join(bundleDir, monitorRootfsDirName)
 
+	if err := cleanupPerContainerViewMounts(bundleDir); err != nil {
+		return err
+	}
+
 	// TODO: We might not need to remove any of the directories and let
 	// the kernel cleanup the mounts and shim to remove directories.
 	// However, just to be on the safe side, we remove all the newly

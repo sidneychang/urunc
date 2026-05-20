@@ -120,6 +120,33 @@ func getMountInfo(path string) (types.BlockDevParams, error) {
 	return blockDev, nil
 }
 
+// bindBootArtifactsToMonRootfs bind-mounts boot files from an external
+// artifact root into the monitor rootfs without changing source permissions.
+func bindBootArtifactsToMonRootfs(artifactRoot, monRootfs, unikernelPath, initrdPath, uruncJSON string) ([]string, error) {
+	norm := func(p string) string { return strings.TrimPrefix(filepath.Clean(p), "/") }
+	files := []struct{ src, target string }{
+		{filepath.Join(artifactRoot, unikernelPath), norm(unikernelPath)},
+		{filepath.Join(artifactRoot, uruncJSON), norm(uruncJSON)},
+	}
+	if initrdPath != "" {
+		files = append(files, struct{ src, target string }{
+			filepath.Join(artifactRoot, initrdPath), norm(initrdPath),
+		})
+	}
+
+	targets := make([]string, 0, len(files))
+	for _, f := range files {
+		dstPath := filepath.Join(monRootfs, f.target)
+		dstDir := filepath.Dir(dstPath)
+		if err := bindMountFile(f.src, dstDir, dstPath, 0, unix.MS_BIND|unix.MS_PRIVATE, false); err != nil {
+			rollbackPerContainerViewTargets(targets)
+			return nil, fmt.Errorf("bind view %s -> monRootfs/%s: %w", f.src, f.target, err)
+		}
+		targets = append(targets, dstPath)
+	}
+	return targets, nil
+}
+
 // extractUnikernelFromBlock moves unikernel binary, initrd and urunc.json
 // files from old rootfsPath to newRootfsPath
 // FIXME: This approach fills up /run with unikernel binaries, initrds and urunc.json
@@ -148,7 +175,6 @@ func extractBootFiles(rootfsPath string, newRootfsPath string, unikernel string,
 	if err != nil {
 		return fmt.Errorf("Could not move %s to %s: %w", currentConfigPath, newRootfsPath, err)
 	}
-
 	return nil
 }
 
@@ -226,25 +252,53 @@ func getBlockVolumes(monRootfs string, mounts []specs.Mount, ukernel types.Unike
 }
 
 func (b blockRootfs) preSetup() error {
+	// Preserve main's propagation fix: consume boot artifacts and unmount the
+	// container rootfs before prepareRoot() makes the mount tree private/slave.
 	if b.mountedPath == "" {
 		return nil
 	}
 
-	err := copyMountfiles(b.mountedPath, b.mounts)
+	bundleDir := filepath.Dir(b.monRootfs)
+	var viewTargets []string
+	fromPerContainerView, err := tryRunOnPerContainerView(bundleDir, func(root string) error {
+		var bindErr error
+		viewTargets, bindErr = bindBootArtifactsToMonRootfs(root, b.monRootfs, b.kernelPath, b.initrdPath, b.uruncJSONPath)
+		return bindErr
+	})
 	if err != nil {
+		if len(viewTargets) > 0 {
+			rollbackPerContainerViewTargets(viewTargets)
+			return fmt.Errorf("snapshot view boot artifact bind completed but cleanup failed: %w", err)
+		}
+		uniklog.WithError(err).Warn("snapshot view unavailable; falling back to legacy boot file extraction")
+		fromPerContainerView = false
+	}
+
+	if err := copyMountfiles(b.mountedPath, b.mounts); err != nil {
 		return fmt.Errorf("failed to copy files from mount list: %w", err)
 	}
 
-	// FIXME: This approach fills up /run with unikernel binaries and
-	// urunc.json files for each unikernel instance we run
-	err = extractBootFiles(b.mountedPath, b.monRootfs, b.kernelPath, b.uruncJSONPath, b.initrdPath)
-	if err != nil {
-		return fmt.Errorf("failed to extract boot files from rootfs: %w", err)
-	}
+	if fromPerContainerView {
+		if err := persistPerContainerViewMountsState(bundleDir, viewTargets); err != nil {
+			rollbackPerContainerViewTargets(viewTargets)
+			return err
+		}
+		if err := mount.Unmount(b.mountedPath); err != nil {
+			return fmt.Errorf("failed to unmount rootfs: %w", err)
+		}
+	} else {
+		if err := removePerContainerViewMountsState(bundleDir); err != nil {
+			return err
+		}
+		// FIXME: This approach fills up /run with unikernel binaries and
+		// urunc.json files for each unikernel instance we run
+		if err := extractBootFiles(b.mountedPath, b.monRootfs, b.kernelPath, b.uruncJSONPath, b.initrdPath); err != nil {
+			return fmt.Errorf("failed to extract boot files from rootfs: %w", err)
+		}
 
-	err = mount.Unmount(b.mountedPath)
-	if err != nil {
-		return fmt.Errorf("failed to unmount rootfs: %w", err)
+		if err := mount.Unmount(b.mountedPath); err != nil {
+			return fmt.Errorf("failed to unmount rootfs: %w", err)
+		}
 	}
 
 	return nil
