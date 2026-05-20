@@ -21,6 +21,55 @@ import (
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
+func TestRootfsNeedsContainerSnapshotView(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		params   types.RootfsParams
+		expected bool
+	}{
+		{
+			name: "container block rootfs",
+			params: types.RootfsParams{
+				Type:        "block",
+				MountedPath: "/bundle/rootfs",
+			},
+			expected: true,
+		},
+		{
+			name: "explicit block image",
+			params: types.RootfsParams{
+				Type:        "block",
+				MountedPath: "",
+			},
+			expected: false,
+		},
+		{
+			name: "virtiofs",
+			params: types.RootfsParams{
+				Type:        "virtiofs",
+				MountedPath: "/bundle/rootfs",
+			},
+			expected: false,
+		},
+		{
+			name: "initrd",
+			params: types.RootfsParams{
+				Type: "initrd",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, RootfsNeedsContainerSnapshotView(tt.params))
+		})
+	}
+}
+
 func TestNewRootfsResult(t *testing.T) {
 	expected := types.RootfsParams{
 		Type:        "initrd",

@@ -382,6 +382,14 @@ func selectRootfs(bundle, cntrRootfs string, annot map[string]string, cfg *Urunc
 	return result, nil
 }
 
+// RootfsNeedsContainerSnapshotView reports whether guest rootfs selection will
+// use the container rootfs as a block device (MountedPath set). That path reads
+// boot artifacts from the container rootfs before attach and benefits from a
+// shim-prepared read-only snapshot view.
+func RootfsNeedsContainerSnapshotView(p types.RootfsParams) bool {
+	return p.Type == "block" && p.MountedPath != ""
+}
+
 // RootfsParamsAnnotation returns the internal annotation key used to hand
 // shim-selected rootfs parameters to the runtime.
 func RootfsParamsAnnotation() string {
