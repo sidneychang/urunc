@@ -72,6 +72,15 @@ Except of the above, `urunc` accepts the following optional annotations:
 - `com.urunc.unikernel.mountRootfs`: A boolean value that if it is `true`,
   requests from `urunc` to mount the container's image rootfs in the unikernel
   (either as a block device or through shared-fs).
+- Per-container snapshot views are enabled in `/etc/urunc/config.toml`
+  (`[snapshot_view] enabled = true`), not via a bundle annotation. See
+  [configuration](../configuration.md#snapshot-view-configuration). When enabled,
+  the container must also use `com.urunc.unikernel.mountRootfs=true` (typically
+  from image annotations merged into `config.json` before shim task Create).
+  Supported snapshotters include `devmapper` and `blockfile`. After the wrapped
+  task service creates the task and mounts the bundle rootfs, the shim runs
+  `ChooseRootfs` and prepares a view only when that selection is container block
+  rootfs.
 
 Due to the fact that [Docker](https://www.docker.com/) and some high-level
 container runtimes do not pass the image annotations to the underlying container
@@ -79,6 +88,10 @@ runtime, `urunc` can also read the above information from a file inside the
 container's rootfs. The file should be named `urunc.json`, it should be
 placed in the root directory of the container's rootfs and it should have a JSON
 format with the above information, where the values are base64 encoded.
+
+Enable snapshot views on the host with `[snapshot_view] enabled = true` in
+`/etc/urunc/config.toml`. The shim prepares a view after task Create when
+`ChooseRootfs` selects container block rootfs on a block snapshotter.
 
 ## Tools to construct OCI images with `urunc`'s annotations
 
