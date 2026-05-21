@@ -65,12 +65,11 @@ type snapshotViewState struct {
 	LeaseID         string        `json:"lease_id"`
 	Snapshotter     string        `json:"snapshotter"`
 	Namespace       string        `json:"namespace"`
-	Mounts          []mount.Mount `json:"mounts,omitempty"`
-	BootBindTargets []string      `json:"boot_bind_targets,omitempty"`
+	Mounts []mount.Mount `json:"mounts,omitempty"`
 }
 
 // SnapshotViewCleanupState is bundle-persisted snapshot view state loaded
-// before Delete tears down runtime-owned bind mounts or bundle files.
+// before Delete removes the containerd view.
 type SnapshotViewCleanupState struct {
 	state *snapshotViewState
 }

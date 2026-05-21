@@ -164,11 +164,38 @@ func (s *taskService) snapshotViewCleanupAfterDelete(ctx context.Context, r *tas
 	}
 
 	return func(ctx context.Context, session *containerdShim.Session) error {
-		snapshotViewAccessor := containerdShim.NewSnapshotViewAccessor(session)
-		if err := snapshotViewAccessor.CleanupLoaded(ctx, bundle, state); err != nil {
+		if err := cleanupSnapshotViewLoaded(ctx, state, session); err != nil {
 			log.G(ctx).WithError(err).Warn("urunc(shim): delete snapshot view during Delete failed")
 			return err
 		}
 		return nil
 	}
+}
+
+// CleanupSnapshotViewFromBundle removes containerd snapshot view resources described
+// in bundle config.json. Boot binds are released with the monitor mount namespace.
+// Missing view state is not an error. Used on the shim "delete" binary path (uruncShimManager.Stop).
+func CleanupSnapshotViewFromBundle(ctx context.Context, containerdAddress, containerID, bundle string) error {
+	state, err := (&containerdShim.SnapshotViewAccessor{}).LoadCleanupState(bundle)
+	if err != nil {
+		if errors.Is(err, containerdShim.ErrSnapshotViewNotPrepared) {
+			return nil
+		}
+		return err
+	}
+
+	session, err := containerdShim.OpenSession(ctx, containerdAddress, containerID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = session.Close()
+	}()
+
+	return cleanupSnapshotViewLoaded(ctx, state, session)
+}
+
+func cleanupSnapshotViewLoaded(ctx context.Context, state *containerdShim.SnapshotViewCleanupState, session *containerdShim.Session) error {
+	snapshotViewAccessor := containerdShim.NewSnapshotViewAccessor(session)
+	return snapshotViewAccessor.CleanupLoaded(ctx, state)
 }
