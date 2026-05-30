@@ -427,6 +427,14 @@ func reexecUnikontainer(cmd *cli.Command) error {
 		err = errors.Join(awaitErr, cleanErr)
 		return err
 	}
+	spec, err := unikontainers.LoadSpec(unikontainer.State.Bundle)
+	if err != nil {
+		return fmt.Errorf("error reloading bundle config: %w", err)
+	}
+	if spec == nil || spec.Linux == nil {
+		return fmt.Errorf("invalid OCI spec: linux section is required")
+	}
+	unikontainer.Spec = spec
 	metrics.Capture(m.TS14)
 
 	err = unikontainer.CreateConn(unikontainers.FromReexec)

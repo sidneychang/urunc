@@ -83,8 +83,8 @@ func moveFile(sourceFile string, targetDir string) error {
 	return os.Remove(sourceFile)
 }
 
-// loadSpec returns the Spec found in the given bundle directory
-func loadSpec(bundleDir string) (*specs.Spec, error) {
+// LoadSpec returns the Spec found in the given bundle directory.
+func LoadSpec(bundleDir string) (*specs.Spec, error) {
 	var spec specs.Spec
 
 	absBundleDir, err := filepath.Abs(bundleDir)

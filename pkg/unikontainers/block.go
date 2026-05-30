@@ -45,6 +45,7 @@ type blockRootfs struct {
 	uruncJSONPath string
 	guestType     string
 	guest         types.Unikernel
+	hostPrepared  bool
 }
 
 // getMountInfo determines whether the provided path is a mount point
@@ -225,7 +226,7 @@ func getBlockVolumes(monRootfs string, mounts []specs.Mount, ukernel types.Unike
 	return blkImgs, nil
 }
 
-func (b blockRootfs) preSetup() error {
+func (b blockRootfs) prepareHostBlockRootfs() error {
 	if b.mountedPath == "" {
 		return nil
 	}
@@ -248,6 +249,47 @@ func (b blockRootfs) preSetup() error {
 	}
 
 	return nil
+}
+
+// PrepareBlockRootfsInHost prepares a container rootfs selected as a block
+// device while the caller is still in the namespace that owns the rootfs mount.
+func PrepareBlockRootfsInHost(params types.RootfsParams, mounts []specs.Mount, annotations map[string]string) (types.RootfsParams, error) {
+	if params.Type != "block" || params.MountedPath == "" {
+		return params, nil
+	}
+
+	b := blockRootfs{
+		mounts:        mounts,
+		monRootfs:     params.MonRootfs,
+		mountedPath:   params.MountedPath,
+		kernelPath:    annotations[annotBinary],
+		initrdPath:    annotations[annotInitrd],
+		uruncJSONPath: uruncJSONFilename,
+	}
+	if err := b.prepareHostBlockRootfs(); err != nil {
+		return types.RootfsParams{}, err
+	}
+
+	params.HostPrepared = true
+	return params, nil
+}
+
+func (b blockRootfs) preSetup() error {
+	if b.hostPrepared {
+		if b.mountedPath == "" {
+			return nil
+		}
+
+		// The shim has already copied boot files and unmounted the rootfs in
+		// the host namespace. Drop this namespace's copy without relying on
+		// mount propagation.
+		if err := mount.Unmount(b.mountedPath); err != nil {
+			return fmt.Errorf("failed to unmount rootfs: %w", err)
+		}
+		return nil
+	}
+
+	return b.prepareHostBlockRootfs()
 }
 
 func (b blockRootfs) postSetup() error {

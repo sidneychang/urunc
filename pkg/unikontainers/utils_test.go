@@ -252,7 +252,7 @@ func TestLoadSpec(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Call the function
-		loadedSpec, err := loadSpec(tempDir)
+		loadedSpec, err := LoadSpec(tempDir)
 		assert.NoError(t, err, "Expected no error in loading spec")
 		assert.Equal(t, spec, *loadedSpec, "Expected loaded spec to match original")
 	})
@@ -260,7 +260,7 @@ func TestLoadSpec(t *testing.T) {
 	t.Run("load spec invalid bundle path", func(t *testing.T) {
 		t.Parallel()
 		// Call the function with an invalid bundle path
-		_, err := loadSpec("invalid/path")
+		_, err := LoadSpec("invalid/path")
 		assert.Error(t, err, "Expected an error for invalid bundle path")
 		assert.Contains(t, err.Error(), "no such file or directory", "Expected specific error message")
 	})
@@ -271,7 +271,7 @@ func TestLoadSpec(t *testing.T) {
 		tempDir := t.TempDir()
 
 		// Call the function with a valid bundle path but without config.json
-		_, err := loadSpec(tempDir)
+		_, err := LoadSpec(tempDir)
 		assert.Error(t, err, "Expected an error for missing "+configFilename+" file")
 		assert.Contains(t, err.Error(), "failed to read specification file", "Expected specific error message")
 	})
@@ -287,7 +287,7 @@ func TestLoadSpec(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Call the function
-		_, err = loadSpec(tempDir)
+		_, err = LoadSpec(tempDir)
 		assert.Error(t, err, "Expected an error for invalid "+configFilename+" file")
 		assert.Contains(t, err.Error(), "failed to parse specification json", "Expected specific error message")
 	})

@@ -66,10 +66,11 @@ type SharedfsParams struct {
 }
 
 type RootfsParams struct {
-	Type        string // The type of rootfs (block, initrd, 9pfs, virtiofs)
-	Path        string // The path in the host where rootfs resides
-	MountedPath string // The mountpoint in the host where the rootfs is mounted
-	MonRootfs   string // The rootfs for the monitor process
+	Type         string // The type of rootfs (block, initrd, 9pfs, virtiofs)
+	Path         string // The path in the host where rootfs resides
+	MountedPath  string // The mountpoint in the host where the rootfs is mounted
+	MonRootfs    string // The rootfs for the monitor process
+	HostPrepared bool   // The shim already prepared host-side rootfs resources
 }
 
 // Specific to Linux

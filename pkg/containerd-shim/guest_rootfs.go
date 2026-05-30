@@ -73,6 +73,10 @@ func chooseGuestRootfs(r *taskAPI.CreateTaskRequest) error {
 	if err != nil {
 		return err
 	}
+	rootfsParams, err = unikontainers.PrepareBlockRootfsInHost(rootfsParams, spec.Mounts, annotations)
+	if err != nil {
+		return err
+	}
 
 	encoded, err := json.Marshal(rootfsParams)
 	if err != nil {
